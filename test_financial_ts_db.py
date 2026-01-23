@@ -96,6 +96,100 @@ class TestInstrumentOperations(unittest.TestCase):
         result = self.db.get_instrument(instrument.id)
         self.assertIsNone(result)
 
+    def test_add_instrument_with_extra_data(self):
+        """Test adding an instrument with extra_data JSON field."""
+        extra_data = {
+            "sector": "Technology",
+            "industry": "Consumer Electronics",
+            "beta": 1.2,
+            "market_cap": 2500000000000
+        }
+        instrument = self.db.add_instrument(
+            ticker="AAPL",
+            name="Apple Inc.",
+            instrument_type=InstrumentType.STOCK,
+            extra_data=extra_data
+        )
+
+        self.assertIsNotNone(instrument.id)
+        self.assertEqual(instrument.extra_data["sector"], "Technology")
+        self.assertEqual(instrument.extra_data["beta"], 1.2)
+        self.assertEqual(instrument.extra_data["market_cap"], 2500000000000)
+
+    def test_update_instrument_extra_data_merge(self):
+        """Test merging extra_data with existing data."""
+        instrument = self.db.add_instrument(
+            ticker="TEST",
+            name="Test Instrument",
+            instrument_type=InstrumentType.STOCK,
+            extra_data={"field1": "value1", "field2": "value2"}
+        )
+
+        # Merge new data
+        updated = self.db.update_instrument_extra_data(
+            instrument.id,
+            {"field3": "value3", "field2": "updated"}
+        )
+
+        self.assertEqual(updated.extra_data["field1"], "value1")
+        self.assertEqual(updated.extra_data["field2"], "updated")
+        self.assertEqual(updated.extra_data["field3"], "value3")
+
+    def test_update_instrument_extra_data_replace(self):
+        """Test replacing extra_data entirely."""
+        instrument = self.db.add_instrument(
+            ticker="TEST",
+            name="Test Instrument",
+            instrument_type=InstrumentType.STOCK,
+            extra_data={"old_field": "old_value"}
+        )
+
+        # Replace entirely
+        updated = self.db.update_instrument_extra_data(
+            instrument.id,
+            {"new_field": "new_value"},
+            merge=False
+        )
+
+        self.assertNotIn("old_field", updated.extra_data)
+        self.assertEqual(updated.extra_data["new_field"], "new_value")
+
+    def test_get_instrument_extra_data(self):
+        """Test getting extra_data and specific keys."""
+        instrument = self.db.add_instrument(
+            ticker="TEST",
+            name="Test Instrument",
+            instrument_type=InstrumentType.STOCK,
+            extra_data={"key1": "value1", "key2": 42}
+        )
+
+        # Get all extra_data
+        all_data = self.db.get_instrument_extra_data(instrument.id)
+        self.assertEqual(all_data, {"key1": "value1", "key2": 42})
+
+        # Get specific key
+        value = self.db.get_instrument_extra_data(instrument.id, "key1")
+        self.assertEqual(value, "value1")
+
+        # Get non-existent key
+        missing = self.db.get_instrument_extra_data(instrument.id, "missing")
+        self.assertIsNone(missing)
+
+    def test_update_instrument_with_extra_data(self):
+        """Test updating extra_data through update_instrument method."""
+        instrument = self.db.add_instrument(
+            ticker="TEST",
+            name="Test Instrument",
+            instrument_type=InstrumentType.STOCK
+        )
+
+        updated = self.db.update_instrument(
+            instrument.id,
+            extra_data={"custom_field": "custom_value"}
+        )
+
+        self.assertEqual(updated.extra_data["custom_field"], "custom_value")
+
 
 class TestFieldOperations(unittest.TestCase):
     """Test field CRUD operations."""
@@ -428,10 +522,57 @@ class TestDeletionPreview(unittest.TestCase):
             "TEST", "Test", InstrumentType.STOCK
         )
 
-        impact = self.db.delete_instrument(instrument.id, dry_run=True)
+        impact = self.db.delete_instrument(instrument.id, dry_run=True, print_output=False)
 
         # Still exists after dry run
         self.assertIsNotNone(self.db.get_instrument(instrument.id))
+
+    def test_dry_run_deletion_prints_output(self):
+        """Test that dry run deletion prints impact to stdout."""
+        import io
+        import sys
+
+        instrument = self.db.add_instrument(
+            "TEST", "Test Instrument", InstrumentType.STOCK
+        )
+        field = self.db.add_field(instrument.id, "PRICE", Frequency.DAILY)
+
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        try:
+            self.db.delete_instrument(instrument.id, dry_run=True, print_output=True)
+        finally:
+            sys.stdout = sys.__stdout__
+
+        output = captured_output.getvalue()
+        self.assertIn("DELETION IMPACT REPORT", output)
+        self.assertIn("Test Instrument", output)
+        self.assertIn("PRICE", output)
+
+    def test_dry_run_field_deletion_prints_output(self):
+        """Test that dry run field deletion prints impact to stdout."""
+        import io
+        import sys
+
+        instrument = self.db.add_instrument(
+            "TEST", "Test Instrument", InstrumentType.STOCK
+        )
+        field = self.db.add_field(instrument.id, "PRICE", Frequency.DAILY)
+
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        try:
+            self.db.delete_field(field.id, dry_run=True, print_output=True)
+        finally:
+            sys.stdout = sys.__stdout__
+
+        output = captured_output.getvalue()
+        self.assertIn("DELETION IMPACT REPORT", output)
+        self.assertIn("PRICE", output)
 
 
 class TestCascadeDeletes(unittest.TestCase):

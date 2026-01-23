@@ -40,7 +40,7 @@ def main():
     # =========================================================================
     print("\n📊 Adding instruments...")
 
-    # Add Apple stock
+    # Add Apple stock with metadata and extra_data
     apple = db.add_instrument(
         ticker="AAPL",
         name="Apple Inc.",
@@ -48,9 +48,11 @@ def main():
         description="American multinational technology company",
         currency="USD",
         exchange="NASDAQ",
-        metadata={"sector": "Technology", "industry": "Consumer Electronics"}
+        metadata={"sector": "Technology", "industry": "Consumer Electronics"},
+        extra_data={"isin": "US0378331005", "cusip": "037833100", "sedol": "2046251"}
     )
     print(f"  Added: {apple.ticker} - {apple.name} (ID: {apple.id})")
+    print(f"    Extra data: {apple.extra_data}")
 
     # Add S&P 500 Index
     spx = db.add_instrument(
@@ -296,10 +298,16 @@ def main():
     # =========================================================================
     print("\n🗑️  Demonstrating dry-run deletion...")
 
-    # Dry run - nothing actually deleted
+    # Dry run with automatic output - prints impact report to stdout
+    print("  Dry run with print_output=True (default):")
     dry_impact = db.delete_instrument(spxtr.id, dry_run=True)
     print(f"  Dry run completed. Would delete {len(dry_impact.fields_to_delete)} fields")
     print(f"  Would delete {len(dry_impact.aliases_to_delete)} alias references")
+
+    # Dry run without output - silent mode for programmatic use
+    print("\n  Dry run with print_output=False (silent mode):")
+    silent_impact = db.delete_instrument(spxtr.id, dry_run=True, print_output=False)
+    print(f"  Silent dry run completed. Impact available programmatically.")
 
     # Verify nothing was deleted
     spxtr_check = db.get_instrument(spxtr.id)
@@ -342,6 +350,22 @@ def main():
     )
     updated_apple = db.get_instrument(apple.id)
     print(f"  Updated AAPL metadata: {updated_apple.metadata}")
+
+    # Update extra_data with merge (adds new fields while preserving existing)
+    db.update_instrument_extra_data(
+        apple.id,
+        {"pe_ratio": 28.5, "dividend_yield": 0.5, "market_cap": 2800000000000}
+    )
+    updated_apple = db.get_instrument(apple.id)
+    print(f"  Updated AAPL extra_data: {updated_apple.extra_data}")
+
+    # Add more extra_data (merges with existing)
+    db.update_instrument_extra_data(apple.id, {"beta": 1.25, "analyst_rating": "Buy"})
+    print(f"  Merged AAPL extra_data: {db.get_instrument_extra_data(apple.id)}")
+
+    # Get a specific extra_data field
+    pe_ratio = db.get_instrument_extra_data(apple.id, "pe_ratio")
+    print(f"  AAPL P/E ratio: {pe_ratio}")
 
     # Update field
     db.update_field(aapl_price_daily.id, description="Last traded closing price (updated)")
