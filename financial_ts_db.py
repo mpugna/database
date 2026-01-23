@@ -87,6 +87,7 @@ class Instrument:
     currency: str = "USD"
     exchange: str = ""
     metadata: dict = field(default_factory=dict)
+    extra_data: dict = field(default_factory=dict)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -160,6 +161,7 @@ CREATE TABLE IF NOT EXISTS instruments (
     currency TEXT DEFAULT 'USD',
     exchange TEXT DEFAULT '',
     metadata TEXT DEFAULT '{}',
+    extra_data TEXT DEFAULT '{}',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -340,7 +342,8 @@ class FinancialTimeSeriesDB:
         description: str = "",
         currency: str = "USD",
         exchange: str = "",
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
+        extra_data: Optional[dict] = None
     ) -> Instrument:
         """
         Add a new instrument to the database.
@@ -353,6 +356,7 @@ class FinancialTimeSeriesDB:
             currency: Currency code (default: USD)
             exchange: Exchange where traded
             metadata: Additional metadata as dictionary
+            extra_data: Additional JSON data for flexible storage
 
         Returns:
             The created Instrument object with its ID
@@ -361,16 +365,17 @@ class FinancialTimeSeriesDB:
             sqlite3.IntegrityError: If ticker already exists
         """
         metadata = metadata or {}
+        extra_data = extra_data or {}
 
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO instruments (ticker, name, instrument_type, description,
-                                         currency, exchange, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                         currency, exchange, metadata, extra_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (ticker, name, instrument_type.value, description,
-                 currency, exchange, json.dumps(metadata))
+                 currency, exchange, json.dumps(metadata), json.dumps(extra_data))
             )
             conn.commit()
 
@@ -444,13 +449,14 @@ class FinancialTimeSeriesDB:
 
         Args:
             instrument_id: ID of the instrument to update
-            **kwargs: Attributes to update (ticker, name, instrument_type, etc.)
+            **kwargs: Attributes to update (ticker, name, instrument_type,
+                      description, currency, exchange, metadata, extra_data)
 
         Returns:
             Updated Instrument or None if not found
         """
         allowed_fields = {'ticker', 'name', 'instrument_type', 'description',
-                          'currency', 'exchange', 'metadata'}
+                          'currency', 'exchange', 'metadata', 'extra_data'}
 
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if not updates:
@@ -461,6 +467,8 @@ class FinancialTimeSeriesDB:
             updates['instrument_type'] = updates['instrument_type'].value
         if 'metadata' in updates and isinstance(updates['metadata'], dict):
             updates['metadata'] = json.dumps(updates['metadata'])
+        if 'extra_data' in updates and isinstance(updates['extra_data'], dict):
+            updates['extra_data'] = json.dumps(updates['extra_data'])
 
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
         values = list(updates.values()) + [instrument_id]
@@ -474,6 +482,74 @@ class FinancialTimeSeriesDB:
 
         logger.info(f"Updated instrument ID: {instrument_id}")
         return self.get_instrument(instrument_id)
+
+    def update_instrument_extra_data(
+        self,
+        instrument_id: int,
+        data: dict,
+        merge: bool = True
+    ) -> Optional[Instrument]:
+        """
+        Update an instrument's extra_data JSON field.
+
+        This method provides convenient partial updates to the extra_data field,
+        allowing you to merge new data with existing data or replace it entirely.
+
+        Args:
+            instrument_id: ID of the instrument to update
+            data: Dictionary of data to add/update
+            merge: If True, merge with existing data (default). If False, replace entirely.
+
+        Returns:
+            Updated Instrument or None if not found
+
+        Example:
+            # Merge new fields with existing extra_data
+            db.update_instrument_extra_data(1, {"sector": "Technology", "beta": 1.2})
+
+            # Later, add more fields (existing fields preserved)
+            db.update_instrument_extra_data(1, {"pe_ratio": 25.5})
+
+            # Replace all extra_data entirely
+            db.update_instrument_extra_data(1, {"new_field": "value"}, merge=False)
+        """
+        instrument = self.get_instrument(instrument_id)
+        if not instrument:
+            return None
+
+        if merge:
+            # Merge new data with existing data
+            existing = instrument.extra_data or {}
+            new_data = {**existing, **data}
+        else:
+            # Replace entirely
+            new_data = data
+
+        return self.update_instrument(instrument_id, extra_data=new_data)
+
+    def get_instrument_extra_data(
+        self,
+        instrument_id: int,
+        key: Optional[str] = None
+    ) -> Optional[dict]:
+        """
+        Get an instrument's extra_data or a specific key from it.
+
+        Args:
+            instrument_id: ID of the instrument
+            key: Optional specific key to retrieve. If None, returns all extra_data.
+
+        Returns:
+            The extra_data dict, a specific value, or None if instrument not found
+        """
+        instrument = self.get_instrument(instrument_id)
+        if not instrument:
+            return None
+
+        if key is None:
+            return instrument.extra_data
+
+        return instrument.extra_data.get(key)
 
     def delete_instrument(
         self,
@@ -1451,6 +1527,7 @@ class FinancialTimeSeriesDB:
             currency=row['currency'],
             exchange=row['exchange'],
             metadata=json.loads(row['metadata']) if row['metadata'] else {},
+            extra_data=json.loads(row['extra_data']) if row['extra_data'] else {},
             created_at=row['created_at'],
             updated_at=row['updated_at']
         )
