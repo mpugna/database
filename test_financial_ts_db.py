@@ -522,10 +522,57 @@ class TestDeletionPreview(unittest.TestCase):
             "TEST", "Test", InstrumentType.STOCK
         )
 
-        impact = self.db.delete_instrument(instrument.id, dry_run=True)
+        impact = self.db.delete_instrument(instrument.id, dry_run=True, print_output=False)
 
         # Still exists after dry run
         self.assertIsNotNone(self.db.get_instrument(instrument.id))
+
+    def test_dry_run_deletion_prints_output(self):
+        """Test that dry run deletion prints impact to stdout."""
+        import io
+        import sys
+
+        instrument = self.db.add_instrument(
+            "TEST", "Test Instrument", InstrumentType.STOCK
+        )
+        field = self.db.add_field(instrument.id, "PRICE", Frequency.DAILY)
+
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        try:
+            self.db.delete_instrument(instrument.id, dry_run=True, print_output=True)
+        finally:
+            sys.stdout = sys.__stdout__
+
+        output = captured_output.getvalue()
+        self.assertIn("DELETION IMPACT REPORT", output)
+        self.assertIn("Test Instrument", output)
+        self.assertIn("PRICE", output)
+
+    def test_dry_run_field_deletion_prints_output(self):
+        """Test that dry run field deletion prints impact to stdout."""
+        import io
+        import sys
+
+        instrument = self.db.add_instrument(
+            "TEST", "Test Instrument", InstrumentType.STOCK
+        )
+        field = self.db.add_field(instrument.id, "PRICE", Frequency.DAILY)
+
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        try:
+            self.db.delete_field(field.id, dry_run=True, print_output=True)
+        finally:
+            sys.stdout = sys.__stdout__
+
+        output = captured_output.getvalue()
+        self.assertIn("DELETION IMPACT REPORT", output)
+        self.assertIn("PRICE", output)
 
 
 class TestCascadeDeletes(unittest.TestCase):

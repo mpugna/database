@@ -554,7 +554,8 @@ class FinancialTimeSeriesDB:
     def delete_instrument(
         self,
         instrument_id: int,
-        dry_run: bool = False
+        dry_run: bool = False,
+        print_output: bool = True
     ) -> DeletionImpact:
         """
         Delete an instrument and all related data.
@@ -568,6 +569,7 @@ class FinancialTimeSeriesDB:
         Args:
             instrument_id: ID of the instrument to delete
             dry_run: If True, only simulate and return impact without deleting
+            print_output: If True and dry_run is True, print impact report to stdout
 
         Returns:
             DeletionImpact object describing what was/would be deleted
@@ -576,6 +578,8 @@ class FinancialTimeSeriesDB:
 
         if dry_run:
             logger.info(f"DRY RUN - Would delete instrument ID: {instrument_id}")
+            if print_output:
+                print_deletion_impact(impact)
             return impact
 
         # Log warnings about aliases that will be broken
@@ -971,7 +975,8 @@ class FinancialTimeSeriesDB:
     def delete_field(
         self,
         field_id: int,
-        dry_run: bool = False
+        dry_run: bool = False,
+        print_output: bool = True
     ) -> DeletionImpact:
         """
         Delete a field and all related data.
@@ -984,6 +989,7 @@ class FinancialTimeSeriesDB:
         Args:
             field_id: ID of the field to delete
             dry_run: If True, only simulate and return impact
+            print_output: If True and dry_run is True, print impact report to stdout
 
         Returns:
             DeletionImpact describing what was/would be deleted
@@ -992,6 +998,8 @@ class FinancialTimeSeriesDB:
 
         if dry_run:
             logger.info(f"DRY RUN - Would delete field ID: {field_id}")
+            if print_output:
+                print_deletion_impact(impact)
             return impact
 
         for warning in impact.warnings:

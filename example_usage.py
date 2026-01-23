@@ -298,10 +298,16 @@ def main():
     # =========================================================================
     print("\n🗑️  Demonstrating dry-run deletion...")
 
-    # Dry run - nothing actually deleted
+    # Dry run with automatic output - prints impact report to stdout
+    print("  Dry run with print_output=True (default):")
     dry_impact = db.delete_instrument(spxtr.id, dry_run=True)
     print(f"  Dry run completed. Would delete {len(dry_impact.fields_to_delete)} fields")
     print(f"  Would delete {len(dry_impact.aliases_to_delete)} alias references")
+
+    # Dry run without output - silent mode for programmatic use
+    print("\n  Dry run with print_output=False (silent mode):")
+    silent_impact = db.delete_instrument(spxtr.id, dry_run=True, print_output=False)
+    print(f"  Silent dry run completed. Impact available programmatically.")
 
     # Verify nothing was deleted
     spxtr_check = db.get_instrument(spxtr.id)
