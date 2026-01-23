@@ -914,9 +914,9 @@ def get_or_setup_bloomberg_field(
 
     field, config = setup_bloomberg_field(
         db=db,
-        instrument_id=instrument.id,
+        ticker=ticker,
         field_name=field_name,
-        frequency=freq_enum,
+        frequency=frequency,
         bloomberg_ticker=bloomberg_ticker,
         bloomberg_field=bloomberg_field,
         overrides=overrides,
@@ -928,9 +928,9 @@ def get_or_setup_bloomberg_field(
 
 def setup_bloomberg_field(
     db: FinancialTimeSeriesDB,
-    instrument_id: int,
+    ticker: str,
     field_name: str,
-    frequency,  # Frequency enum
+    frequency: str,
     bloomberg_ticker: str,
     bloomberg_field: str,
     overrides: Optional[dict] = None,
@@ -945,9 +945,9 @@ def setup_bloomberg_field(
 
     Args:
         db: FinancialTimeSeriesDB instance
-        instrument_id: ID of the instrument
+        ticker: Instrument ticker in database (e.g., "AAPL", "SPX")
         field_name: Internal field name (e.g., "price")
-        frequency: Data frequency (Frequency enum)
+        frequency: Data frequency as string (e.g., "daily", "weekly")
         bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity", "SPX Index")
         bloomberg_field: Bloomberg field name (e.g., "PX_LAST", "TOT_RETURN_INDEX_GROSS_DVDS")
         overrides: Optional Bloomberg field overrides (e.g., {"BEST_FPERIOD_OVERRIDE": "1BF"})
@@ -960,18 +960,34 @@ def setup_bloomberg_field(
     Example:
         field, config = setup_bloomberg_field(
             db=db,
-            instrument_id=apple.id,
+            ticker="AAPL",
             field_name="price",
-            frequency=Frequency.DAILY,
+            frequency="daily",
             bloomberg_ticker="AAPL US Equity",
             bloomberg_field="PX_LAST"
         )
     """
+    from financial_ts_db import Frequency
+
+    # Convert frequency string to enum
+    try:
+        freq_enum = Frequency(frequency.lower())
+    except ValueError:
+        raise ValueError(
+            f"Invalid frequency '{frequency}'. Valid options: "
+            f"{', '.join(f.value for f in Frequency)}"
+        )
+
+    # Look up instrument by ticker
+    instrument = db.get_instrument_by_ticker(ticker)
+    if not instrument:
+        raise ValueError(f"Instrument not found with ticker: {ticker}")
+
     # Add the field
     field = db.add_field(
-        instrument_id=instrument_id,
+        instrument_id=instrument.id,
         field_name=field_name,
-        frequency=frequency,
+        frequency=freq_enum,
         description=description
     )
 

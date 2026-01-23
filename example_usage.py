@@ -498,14 +498,14 @@ def bloomberg_example():
     print(f"  Added: {apple.ticker} (ID: {apple.id})")
 
     # Use setup_bloomberg_field to add field with Bloomberg config
-    # Bloomberg connection details are explicitly provided and stored in DB
+    # All identifiers are strings - no numeric IDs needed
     price_field, price_config = setup_bloomberg_field(
         db=db,
-        instrument_id=apple.id,
-        field_name="price",
-        frequency=Frequency.DAILY,
-        bloomberg_ticker="AAPL US Equity",  # Full Bloomberg ticker
-        bloomberg_field="PX_LAST",           # Bloomberg field name
+        ticker="AAPL",                       # Instrument ticker (string)
+        field_name="price",                  # Field name (string)
+        frequency="daily",                   # Frequency (string)
+        bloomberg_ticker="AAPL US Equity",   # Bloomberg ticker (stored in DB)
+        bloomberg_field="PX_LAST",           # Bloomberg field (stored in DB)
         description="Daily closing price from Bloomberg"
     )
     print(f"  Added field: {price_field.field_name} with Bloomberg config")
@@ -662,20 +662,22 @@ apple = db.add_instrument(
 )
 
 # Option 1: Use setup_bloomberg_field
-# Bloomberg config is stored in provider_configs table
+# All identifiers are strings - Bloomberg config is stored in provider_configs table
 field, config = setup_bloomberg_field(
     db=db,
-    instrument_id=apple.id,
-    field_name="price",
-    frequency=Frequency.DAILY,
-    bloomberg_ticker="AAPL US Equity",  # Stored in DB
+    ticker="AAPL",                       # Instrument ticker (string)
+    field_name="price",                  # Field name (string)
+    frequency="daily",                   # Frequency (string)
+    bloomberg_ticker="AAPL US Equity",   # Stored in DB
     bloomberg_field="PX_LAST",           # Stored in DB
     overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}  # Stored in DB
 )
 
-# Option 2: Manual configuration
+# Option 2: Manual configuration (if you need more control)
+# First get the instrument, then add field
+instrument = db.get_instrument_by_ticker("AAPL")
 price_field = db.add_field(
-    instrument_id=apple.id,
+    instrument_id=instrument.id,
     field_name="total_return",
     frequency=Frequency.DAILY
 )
