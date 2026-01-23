@@ -8,9 +8,10 @@ This script demonstrates all major features of the FinancialTimeSeriesDB:
 - Configuring data providers
 - Storing and retrieving time series data
 - Previewing and executing deletions
+- Bloomberg data fetching integration
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from financial_ts_db import (
     FinancialTimeSeriesDB,
     Frequency,
@@ -19,6 +20,19 @@ from financial_ts_db import (
     print_deletion_impact,
     create_database
 )
+
+# Bloomberg integration imports (optional - only if blpapi is installed)
+try:
+    from bloomberg_fetcher import (
+        BloombergFetcher,
+        setup_bloomberg_field,
+        create_bloomberg_config,
+        format_bloomberg_ticker,
+        get_bloomberg_field,
+        BLPAPI_AVAILABLE
+    )
+except ImportError:
+    BLPAPI_AVAILABLE = False
 
 
 def main():
@@ -436,5 +450,272 @@ def main():
     db.close()
 
 
+def bloomberg_example():
+    """
+    Demonstrate Bloomberg data fetching integration.
+
+    This example shows how to:
+    - Set up fields with Bloomberg provider configs
+    - Use the BloombergFetcher to retrieve historical data
+    - Store Bloomberg data in the time series database
+
+    NOTE: This requires:
+    1. blpapi Python package installed (pip install blpapi)
+    2. Bloomberg Terminal or B-PIPE connection available
+    """
+    if not BLPAPI_AVAILABLE:
+        print("\n" + "=" * 70)
+        print("BLOOMBERG EXAMPLE - SKIPPED")
+        print("=" * 70)
+        print("\nBloomberg API (blpapi) is not installed.")
+        print("To enable Bloomberg integration:")
+        print("  1. Install blpapi: pip install blpapi")
+        print("  2. Ensure Bloomberg Terminal is running, or")
+        print("  3. Configure B-PIPE connection")
+        print("\nShowing example code structure instead...\n")
+        _show_bloomberg_example_code()
+        return
+
+    print("\n" + "=" * 70)
+    print("BLOOMBERG DATA FETCHING EXAMPLE")
+    print("=" * 70)
+
+    # Create database
+    db = create_database(":memory:")
+
+    # =========================================================================
+    # 1. Set up instruments and fields with Bloomberg configs
+    # =========================================================================
+    print("\n📊 Setting up instruments with Bloomberg configs...")
+
+    # Add Apple stock
+    apple = db.add_instrument(
+        ticker="AAPL",
+        name="Apple Inc.",
+        instrument_type=InstrumentType.STOCK,
+        currency="USD",
+        exchange="NASDAQ"
+    )
+    print(f"  Added: {apple.ticker} (ID: {apple.id})")
+
+    # Use the convenience function to add field with Bloomberg config
+    price_field, price_config = setup_bloomberg_field(
+        db=db,
+        instrument_id=apple.id,
+        field_name="price",
+        frequency=Frequency.DAILY,
+        ticker="AAPL",
+        security_type="stock",
+        exchange="US",
+        description="Daily closing price from Bloomberg"
+    )
+    print(f"  Added field: {price_field.field_name} with Bloomberg config")
+    print(f"    Bloomberg ticker: {price_config.config['ticker']}")
+    print(f"    Bloomberg field: {price_config.config['field']}")
+
+    # Add Microsoft with manual config for more control
+    msft = db.add_instrument(
+        ticker="MSFT",
+        name="Microsoft Corporation",
+        instrument_type=InstrumentType.STOCK,
+        currency="USD",
+        exchange="NASDAQ"
+    )
+
+    msft_price = db.add_field(
+        instrument_id=msft.id,
+        field_name="price",
+        frequency=Frequency.DAILY,
+        description="Daily closing price"
+    )
+
+    # Create Bloomberg config with custom settings
+    msft_bb_config = create_bloomberg_config(
+        ticker="MSFT",
+        field="PX_LAST",
+        security_type="stock",
+        exchange="US",
+        overrides={"BEST_FPERIOD_OVERRIDE": "1BF"},
+        periodicity="DAILY"
+    )
+
+    db.add_provider_config(
+        field_id=msft_price.id,
+        provider=DataProvider.BLOOMBERG,
+        config=msft_bb_config,
+        priority=0
+    )
+    print(f"  Added: {msft.ticker} with custom Bloomberg config")
+
+    # =========================================================================
+    # 2. Fetch data from Bloomberg
+    # =========================================================================
+    print("\n📡 Fetching data from Bloomberg...")
+
+    try:
+        # Create fetcher with context manager for automatic cleanup
+        with BloombergFetcher(db, auto_connect=True) as fetcher:
+
+            # Fetch historical data for Apple
+            print(f"\n  Fetching AAPL historical prices...")
+            aapl_data = fetcher.fetch_historical_data(
+                field_id=price_field.id,
+                start_date=date(2024, 1, 1),
+                end_date=date(2024, 1, 31),
+                store=True  # Automatically store in database
+            )
+            print(f"    Fetched {len(aapl_data)} data points")
+
+            # Fetch current/reference data
+            print(f"\n  Fetching AAPL current price...")
+            current = fetcher.fetch_reference_data(
+                field_id=price_field.id,
+                store=True
+            )
+            if current:
+                print(f"    Current price: ${current.value:.2f}")
+
+            # Fetch all Bloomberg-configured fields for an instrument
+            print(f"\n  Fetching all MSFT Bloomberg data...")
+            all_msft_data = fetcher.fetch_all_instrument_data(
+                instrument_id=msft.id,
+                start_date=date(2024, 1, 1),
+                store=True
+            )
+            for field_id, points in all_msft_data.items():
+                field = db.get_field(field_id)
+                print(f"    {field.field_name}: {len(points)} points")
+
+    except RuntimeError as e:
+        print(f"\n  ⚠️  Bloomberg connection failed: {e}")
+        print("  Make sure Bloomberg Terminal is running.")
+
+    # =========================================================================
+    # 3. Query the stored data
+    # =========================================================================
+    print("\n📈 Querying stored Bloomberg data...")
+
+    # Get time series from database
+    aapl_series = db.get_time_series(
+        field_id=price_field.id,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 10)
+    )
+
+    if aapl_series:
+        print(f"  AAPL prices (first 5):")
+        for point in aapl_series[:5]:
+            print(f"    {point.timestamp.date()}: ${point.value:.2f}")
+    else:
+        print("  No data stored (Bloomberg connection may have failed)")
+
+    # =========================================================================
+    # 4. Helper function demonstrations
+    # =========================================================================
+    print("\n🔧 Bloomberg helper functions:")
+
+    # Format tickers
+    print(f"  format_bloomberg_ticker('AAPL', 'stock', 'US') = "
+          f"'{format_bloomberg_ticker('AAPL', 'stock', 'US')}'")
+    print(f"  format_bloomberg_ticker('SPX', 'index') = "
+          f"'{format_bloomberg_ticker('SPX', 'index')}'")
+    print(f"  format_bloomberg_ticker('USGG10YR', 'bond', 'US') = "
+          f"'{format_bloomberg_ticker('USGG10YR', 'bond', 'US')}'")
+
+    # Field mappings
+    print(f"\n  get_bloomberg_field('price') = '{get_bloomberg_field('price')}'")
+    print(f"  get_bloomberg_field('pct total return') = "
+          f"'{get_bloomberg_field('pct total return')}'")
+
+    print("\n" + "=" * 70)
+    print("BLOOMBERG EXAMPLE COMPLETED")
+    print("=" * 70)
+
+    db.close()
+
+
+def _show_bloomberg_example_code():
+    """Show example code when blpapi is not available."""
+    example_code = '''
+# Example: Setting up Bloomberg integration
+
+from financial_ts_db import (
+    FinancialTimeSeriesDB, Frequency, InstrumentType, DataProvider
+)
+from bloomberg_fetcher import (
+    BloombergFetcher, setup_bloomberg_field, create_bloomberg_config
+)
+from datetime import date
+
+# Create database
+db = FinancialTimeSeriesDB("financial_data.db")
+
+# Add instrument
+apple = db.add_instrument(
+    ticker="AAPL",
+    name="Apple Inc.",
+    instrument_type=InstrumentType.STOCK
+)
+
+# Option 1: Use convenience function
+field, config = setup_bloomberg_field(
+    db=db,
+    instrument_id=apple.id,
+    field_name="price",
+    frequency=Frequency.DAILY,
+    ticker="AAPL",
+    security_type="stock",
+    exchange="US"
+)
+
+# Option 2: Manual configuration
+price_field = db.add_field(
+    instrument_id=apple.id,
+    field_name="price",
+    frequency=Frequency.DAILY
+)
+
+bb_config = create_bloomberg_config(
+    ticker="AAPL",
+    field="PX_LAST",
+    security_type="stock",
+    exchange="US",
+    overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}
+)
+
+db.add_provider_config(
+    field_id=price_field.id,
+    provider=DataProvider.BLOOMBERG,
+    config=bb_config
+)
+
+# Fetch data from Bloomberg
+with BloombergFetcher(db, auto_connect=True) as fetcher:
+    # Fetch historical data
+    data = fetcher.fetch_historical_data(
+        field_id=field.id,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 12, 31),
+        store=True
+    )
+    print(f"Fetched {len(data)} data points")
+
+    # Fetch current price
+    current = fetcher.fetch_reference_data(field.id, store=True)
+    print(f"Current price: ${current.value:.2f}")
+
+# Query stored data
+series = db.get_time_series(field.id)
+for point in series[-5:]:
+    print(f"{point.timestamp.date()}: ${point.value:.2f}")
+'''
+    print(example_code)
+
+
 if __name__ == "__main__":
     main()
+
+    # Run Bloomberg example if user wants to see it
+    print("\n" + "-" * 70)
+    print("Run bloomberg_example() to see Bloomberg integration demo")
+    print("-" * 70)
