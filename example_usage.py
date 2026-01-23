@@ -26,9 +26,8 @@ try:
     from bloomberg_fetcher import (
         BloombergFetcher,
         setup_bloomberg_field,
+        get_or_setup_bloomberg_field,
         create_bloomberg_config,
-        format_bloomberg_ticker,
-        get_bloomberg_field,
         BLPAPI_AVAILABLE
     )
 except ImportError:
@@ -498,20 +497,19 @@ def bloomberg_example():
     )
     print(f"  Added: {apple.ticker} (ID: {apple.id})")
 
-    # Use the convenience function to add field with Bloomberg config
+    # Use setup_bloomberg_field to add field with Bloomberg config
+    # Bloomberg connection details are explicitly provided and stored in DB
     price_field, price_config = setup_bloomberg_field(
         db=db,
         instrument_id=apple.id,
         field_name="price",
         frequency=Frequency.DAILY,
-        ticker="AAPL",
-        security_type="stock",
-        exchange="US",
+        bloomberg_ticker="AAPL US Equity",  # Full Bloomberg ticker
+        bloomberg_field="PX_LAST",           # Bloomberg field name
         description="Daily closing price from Bloomberg"
     )
     print(f"  Added field: {price_field.field_name} with Bloomberg config")
-    print(f"    Bloomberg ticker: {price_config.config['ticker']}")
-    print(f"    Bloomberg field: {price_config.config['field']}")
+    print(f"    Config stored in DB: {price_config.config}")
 
     # Add Microsoft with manual config for more control
     msft = db.add_instrument(
@@ -529,14 +527,12 @@ def bloomberg_example():
         description="Daily closing price"
     )
 
-    # Create Bloomberg config with custom settings
+    # Create Bloomberg config and store in DB
+    # All connection details are stored in provider_configs table
     msft_bb_config = create_bloomberg_config(
-        ticker="MSFT",
-        field="PX_LAST",
-        security_type="stock",
-        exchange="US",
-        overrides={"BEST_FPERIOD_OVERRIDE": "1BF"},
-        periodicity="DAILY"
+        bloomberg_ticker="MSFT US Equity",
+        bloomberg_field="PX_LAST",
+        overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}
     )
 
     db.add_provider_config(
@@ -545,7 +541,7 @@ def bloomberg_example():
         config=msft_bb_config,
         priority=0
     )
-    print(f"  Added: {msft.ticker} with custom Bloomberg config")
+    print(f"  Added: {msft.ticker} with Bloomberg config: {msft_bb_config}")
 
     # =========================================================================
     # 2. Fetch data from Bloomberg
@@ -610,22 +606,20 @@ def bloomberg_example():
         print("  No data stored (Bloomberg connection may have failed)")
 
     # =========================================================================
-    # 4. Helper function demonstrations
+    # 4. Show stored provider config
     # =========================================================================
-    print("\n🔧 Bloomberg helper functions:")
+    print("\n🔧 Retrieving Bloomberg config from database:")
 
-    # Format tickers
-    print(f"  format_bloomberg_ticker('AAPL', 'stock', 'US') = "
-          f"'{format_bloomberg_ticker('AAPL', 'stock', 'US')}'")
-    print(f"  format_bloomberg_ticker('SPX', 'index') = "
-          f"'{format_bloomberg_ticker('SPX', 'index')}'")
-    print(f"  format_bloomberg_ticker('USGG10YR', 'bond', 'US') = "
-          f"'{format_bloomberg_ticker('USGG10YR', 'bond', 'US')}'")
-
-    # Field mappings
-    print(f"\n  get_bloomberg_field('price') = '{get_bloomberg_field('price')}'")
-    print(f"  get_bloomberg_field('pct total return') = "
-          f"'{get_bloomberg_field('pct total return')}'")
+    # The Bloomberg connection details are stored in provider_configs
+    configs = db.get_provider_configs_for_field(price_field.id)
+    for cfg in configs:
+        if cfg.provider == DataProvider.BLOOMBERG:
+            print(f"  Field ID: {cfg.field_id}")
+            print(f"  Provider: {cfg.provider.value}")
+            print(f"  Config from DB: {cfg.config}")
+            print(f"    - ticker: {cfg.config.get('ticker')}")
+            print(f"    - field: {cfg.config.get('field')}")
+            print(f"    - overrides: {cfg.config.get('overrides')}")
 
     print("\n" + "=" * 70)
     print("BLOOMBERG EXAMPLE COMPLETED")
@@ -637,17 +631,27 @@ def bloomberg_example():
 def _show_bloomberg_example_code():
     """Show example code when blpapi is not available."""
     example_code = '''
-# Example: Setting up Bloomberg integration
+# Example: Bloomberg integration with database-stored config
+#
+# Key concept: All Bloomberg connection details (ticker, field, overrides)
+# are stored in the database's provider_configs table. When fetching data,
+# the fetcher reads the config from the DB - nothing is hardcoded.
 
 from financial_ts_db import (
     FinancialTimeSeriesDB, Frequency, InstrumentType, DataProvider
 )
 from bloomberg_fetcher import (
-    BloombergFetcher, setup_bloomberg_field, create_bloomberg_config
+    BloombergFetcher,
+    setup_bloomberg_field,
+    get_or_setup_bloomberg_field,
+    create_bloomberg_config
 )
 from datetime import date
 
-# Create database
+# =============================================================================
+# Setup: Store Bloomberg connection details in database
+# =============================================================================
+
 db = FinancialTimeSeriesDB("financial_data.db")
 
 # Add instrument
@@ -657,41 +661,48 @@ apple = db.add_instrument(
     instrument_type=InstrumentType.STOCK
 )
 
-# Option 1: Use convenience function
+# Option 1: Use setup_bloomberg_field
+# Bloomberg config is stored in provider_configs table
 field, config = setup_bloomberg_field(
     db=db,
     instrument_id=apple.id,
     field_name="price",
     frequency=Frequency.DAILY,
-    ticker="AAPL",
-    security_type="stock",
-    exchange="US"
+    bloomberg_ticker="AAPL US Equity",  # Stored in DB
+    bloomberg_field="PX_LAST",           # Stored in DB
+    overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}  # Stored in DB
 )
 
 # Option 2: Manual configuration
 price_field = db.add_field(
     instrument_id=apple.id,
-    field_name="price",
+    field_name="total_return",
     frequency=Frequency.DAILY
 )
 
+# Create config dict and store in database
 bb_config = create_bloomberg_config(
-    ticker="AAPL",
-    field="PX_LAST",
-    security_type="stock",
-    exchange="US",
-    overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}
+    bloomberg_ticker="AAPL US Equity",
+    bloomberg_field="TOT_RETURN_INDEX_GROSS_DVDS",
+    overrides={}
 )
 
 db.add_provider_config(
     field_id=price_field.id,
     provider=DataProvider.BLOOMBERG,
-    config=bb_config
+    config=bb_config  # Stored in DB
 )
 
-# Fetch data from Bloomberg
-with BloombergFetcher(db, auto_connect=True) as fetcher:
-    # Fetch historical data
+# =============================================================================
+# Fetch: Read config from database and call Bloomberg
+# =============================================================================
+
+with BloombergFetcher(db) as fetcher:
+
+    # The fetcher reads Bloomberg config from the database
+    # No hardcoded field mappings - everything comes from provider_configs
+
+    # Method 1: Fetch by field_id (reads config from DB)
     data = fetcher.fetch_historical_data(
         field_id=field.id,
         start_date=date(2024, 1, 1),
@@ -700,14 +711,29 @@ with BloombergFetcher(db, auto_connect=True) as fetcher:
     )
     print(f"Fetched {len(data)} data points")
 
-    # Fetch current price
-    current = fetcher.fetch_reference_data(field.id, store=True)
-    print(f"Current price: ${current.value:.2f}")
+    # Method 2: Incremental fetch by ticker/field_name/frequency
+    # Looks up field in DB, gets Bloomberg config, fetches only new data
+    data, info = fetcher.fetch_incremental_data(
+        ticker="AAPL",
+        field_name="price",
+        frequency="daily",
+        default_start_date=date(2020, 1, 1)
+    )
+    print(f"Start date used: {info['start_date_used']}")
+    print(f"Bloomberg config from DB: {info['bloomberg_config'].config}")
 
-# Query stored data
+# =============================================================================
+# Query: Data is stored with reference to the field
+# =============================================================================
+
 series = db.get_time_series(field.id)
 for point in series[-5:]:
     print(f"{point.timestamp.date()}: ${point.value:.2f}")
+
+# You can also check what config is stored
+configs = db.get_provider_configs_for_field(field.id)
+for cfg in configs:
+    print(f"Provider: {cfg.provider.value}, Config: {cfg.config}")
 '''
     print(example_code)
 
