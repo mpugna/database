@@ -26,6 +26,7 @@ try:
     from bloomberg_fetcher import (
         BloombergFetcher,
         setup_bloomberg_field,
+        get_or_setup_bloomberg_field,
         create_bloomberg_config,
         format_bloomberg_ticker,
         get_bloomberg_field,
@@ -456,7 +457,8 @@ def bloomberg_example():
 
     This example shows how to:
     - Set up fields with Bloomberg provider configs
-    - Use the BloombergFetcher to retrieve historical data
+    - Check for existing data and determine start date
+    - Use the BloombergFetcher to retrieve historical data incrementally
     - Store Bloomberg data in the time series database
 
     NOTE: This requires:
@@ -484,9 +486,9 @@ def bloomberg_example():
     db = create_database(":memory:")
 
     # =========================================================================
-    # 1. Set up instruments and fields with Bloomberg configs
+    # 1. Set up instruments
     # =========================================================================
-    print("\n📊 Setting up instruments with Bloomberg configs...")
+    print("\n📊 Setting up instruments...")
 
     # Add Apple stock
     apple = db.add_instrument(
@@ -498,119 +500,155 @@ def bloomberg_example():
     )
     print(f"  Added: {apple.ticker} (ID: {apple.id})")
 
-    # Use the convenience function to add field with Bloomberg config
-    price_field, price_config = setup_bloomberg_field(
+    # Add S&P 500 Index
+    spx = db.add_instrument(
+        ticker="SPX",
+        name="S&P 500 Index",
+        instrument_type=InstrumentType.INDEX,
+        currency="USD"
+    )
+    print(f"  Added: {spx.ticker} (ID: {spx.id})")
+
+    # =========================================================================
+    # 2. Get or create fields with Bloomberg config (using string literals)
+    # =========================================================================
+    print("\n📋 Setting up fields with Bloomberg configs...")
+
+    # Use get_or_setup_bloomberg_field - works for both new and existing fields
+    # Uses ticker string instead of instrument_id
+    aapl_field, aapl_config, created = get_or_setup_bloomberg_field(
         db=db,
-        instrument_id=apple.id,
+        ticker="AAPL",              # String ticker, not ID
         field_name="price",
-        frequency=Frequency.DAILY,
-        ticker="AAPL",
+        frequency="daily",          # String frequency, not enum
         security_type="stock",
-        exchange="US",
-        description="Daily closing price from Bloomberg"
+        exchange="US"
     )
-    print(f"  Added field: {price_field.field_name} with Bloomberg config")
-    print(f"    Bloomberg ticker: {price_config.config['ticker']}")
-    print(f"    Bloomberg field: {price_config.config['field']}")
+    print(f"  AAPL price field: {'created' if created else 'exists'} (ID: {aapl_field.id})")
+    print(f"    Bloomberg ticker: {aapl_config.config['ticker']}")
+    print(f"    Bloomberg field: {aapl_config.config['field']}")
 
-    # Add Microsoft with manual config for more control
-    msft = db.add_instrument(
-        ticker="MSFT",
-        name="Microsoft Corporation",
-        instrument_type=InstrumentType.STOCK,
-        currency="USD",
-        exchange="NASDAQ"
-    )
-
-    msft_price = db.add_field(
-        instrument_id=msft.id,
+    spx_field, spx_config, created = get_or_setup_bloomberg_field(
+        db=db,
+        ticker="SPX",
         field_name="price",
-        frequency=Frequency.DAILY,
-        description="Daily closing price"
+        frequency="daily",
+        security_type="index"
     )
-
-    # Create Bloomberg config with custom settings
-    msft_bb_config = create_bloomberg_config(
-        ticker="MSFT",
-        field="PX_LAST",
-        security_type="stock",
-        exchange="US",
-        overrides={"BEST_FPERIOD_OVERRIDE": "1BF"},
-        periodicity="DAILY"
-    )
-
-    db.add_provider_config(
-        field_id=msft_price.id,
-        provider=DataProvider.BLOOMBERG,
-        config=msft_bb_config,
-        priority=0
-    )
-    print(f"  Added: {msft.ticker} with custom Bloomberg config")
+    print(f"  SPX price field: {'created' if created else 'exists'} (ID: {spx_field.id})")
 
     # =========================================================================
-    # 2. Fetch data from Bloomberg
+    # 3. Incremental data fetching workflow
     # =========================================================================
-    print("\n📡 Fetching data from Bloomberg...")
+    print("\n📡 Incremental data fetching from Bloomberg...")
 
     try:
-        # Create fetcher with context manager for automatic cleanup
-        with BloombergFetcher(db, auto_connect=True) as fetcher:
+        with BloombergFetcher(db) as fetcher:
 
-            # Fetch historical data for Apple
-            print(f"\n  Fetching AAPL historical prices...")
-            aapl_data = fetcher.fetch_historical_data(
-                field_id=price_field.id,
-                start_date=date(2024, 1, 1),
-                end_date=date(2024, 1, 31),
-                store=True  # Automatically store in database
-            )
-            print(f"    Fetched {len(aapl_data)} data points")
+            # -----------------------------------------------------------------
+            # Step 1: Check existing data using get_bloomberg_field_info
+            # -----------------------------------------------------------------
+            print("\n  Step 1: Check existing data for AAPL...")
 
-            # Fetch current/reference data
-            print(f"\n  Fetching AAPL current price...")
-            current = fetcher.fetch_reference_data(
-                field_id=price_field.id,
-                store=True
+            info = fetcher.get_bloomberg_field_info(
+                ticker="AAPL",
+                field_name="price",
+                frequency="daily"
             )
-            if current:
-                print(f"    Current price: ${current.value:.2f}")
 
-            # Fetch all Bloomberg-configured fields for an instrument
-            print(f"\n  Fetching all MSFT Bloomberg data...")
-            all_msft_data = fetcher.fetch_all_instrument_data(
-                instrument_id=msft.id,
-                start_date=date(2024, 1, 1),
-                store=True
+            if info:
+                print(f"    Field ID: {info['field_id']}")
+                print(f"    Has data: {info['has_data']}")
+                print(f"    Latest date: {info['latest_date']}")
+
+                if info['bloomberg_config']:
+                    bb = info['bloomberg_config'].config
+                    print(f"    Bloomberg ticker: {bb['ticker']}")
+                    print(f"    Bloomberg field: {bb['field']}")
+            else:
+                print("    Field not found!")
+
+            # -----------------------------------------------------------------
+            # Step 2: Fetch incrementally (auto-determines start date)
+            # -----------------------------------------------------------------
+            print("\n  Step 2: Fetch incremental data for AAPL...")
+
+            # This method automatically:
+            # - Looks up field by ticker/field_name/frequency
+            # - Gets latest date from DB (or uses default_start_date)
+            # - Fetches only missing data
+            # - Stores it in the database
+
+            data, result = fetcher.fetch_incremental_data(
+                ticker="AAPL",
+                field_name="price",
+                frequency="daily",
+                default_start_date=date(2024, 1, 1)  # Used if DB is empty
             )
-            for field_id, points in all_msft_data.items():
-                field = db.get_field(field_id)
-                print(f"    {field.field_name}: {len(points)} points")
+
+            if result['skipped']:
+                print(f"    Skipped - DB is up to date through {result['latest_date']}")
+            else:
+                print(f"    Fetched {len(data)} new data points")
+                print(f"    Start date used: {result['start_date_used']}")
+                print(f"    End date used: {result['end_date_used']}")
+
+            # -----------------------------------------------------------------
+            # Step 3: Run again to show incremental behavior
+            # -----------------------------------------------------------------
+            print("\n  Step 3: Run incremental fetch again (should skip or fetch new)...")
+
+            data2, result2 = fetcher.fetch_incremental_data(
+                ticker="AAPL",
+                field_name="price",
+                frequency="daily",
+                default_start_date=date(2024, 1, 1)
+            )
+
+            if result2['skipped']:
+                print(f"    Skipped - already up to date")
+            else:
+                print(f"    Fetched {len(data2)} additional points")
+
+            # -----------------------------------------------------------------
+            # Step 4: Fetch for SPX using same pattern
+            # -----------------------------------------------------------------
+            print("\n  Step 4: Fetch SPX data...")
+
+            spx_data, spx_result = fetcher.fetch_incremental_data(
+                ticker="SPX",
+                field_name="price",
+                frequency="daily",
+                default_start_date=date(2024, 1, 1)
+            )
+            print(f"    Fetched {len(spx_data)} points for SPX")
 
     except RuntimeError as e:
         print(f"\n  ⚠️  Bloomberg connection failed: {e}")
         print("  Make sure Bloomberg Terminal is running.")
 
     # =========================================================================
-    # 3. Query the stored data
+    # 4. Query the stored data
     # =========================================================================
-    print("\n📈 Querying stored Bloomberg data...")
+    print("\n📈 Querying stored data...")
 
     # Get time series from database
-    aapl_series = db.get_time_series(
-        field_id=price_field.id,
-        start_date=date(2024, 1, 1),
-        end_date=date(2024, 1, 10)
-    )
+    aapl_series = db.get_time_series(field_id=aapl_field.id)
 
     if aapl_series:
-        print(f"  AAPL prices (first 5):")
-        for point in aapl_series[:5]:
+        print(f"  AAPL: {len(aapl_series)} total points")
+        print("  Latest 5 prices:")
+        for point in aapl_series[-5:]:
             print(f"    {point.timestamp.date()}: ${point.value:.2f}")
     else:
-        print("  No data stored (Bloomberg connection may have failed)")
+        print("  No AAPL data (Bloomberg connection may have failed)")
+
+    spx_series = db.get_time_series(field_id=spx_field.id)
+    if spx_series:
+        print(f"\n  SPX: {len(spx_series)} total points")
 
     # =========================================================================
-    # 4. Helper function demonstrations
+    # 5. Helper function demonstrations
     # =========================================================================
     print("\n🔧 Bloomberg helper functions:")
 
@@ -619,8 +657,6 @@ def bloomberg_example():
           f"'{format_bloomberg_ticker('AAPL', 'stock', 'US')}'")
     print(f"  format_bloomberg_ticker('SPX', 'index') = "
           f"'{format_bloomberg_ticker('SPX', 'index')}'")
-    print(f"  format_bloomberg_ticker('USGG10YR', 'bond', 'US') = "
-          f"'{format_bloomberg_ticker('USGG10YR', 'bond', 'US')}'")
 
     # Field mappings
     print(f"\n  get_bloomberg_field('price') = '{get_bloomberg_field('price')}'")
@@ -637,77 +673,126 @@ def bloomberg_example():
 def _show_bloomberg_example_code():
     """Show example code when blpapi is not available."""
     example_code = '''
-# Example: Setting up Bloomberg integration
+# Example: Incremental Bloomberg data fetching
+#
+# This example shows the recommended workflow:
+# 1. Given a ticker, field, and frequency - check for existing data
+# 2. If data exists, start from the latest date; otherwise use a default date
+# 3. Query the database for the Bloomberg provider config
+# 4. Call Bloomberg API to fetch missing data
+# 5. Store the new data in the database
 
-from financial_ts_db import (
-    FinancialTimeSeriesDB, Frequency, InstrumentType, DataProvider
-)
-from bloomberg_fetcher import (
-    BloombergFetcher, setup_bloomberg_field, create_bloomberg_config
-)
+from financial_ts_db import FinancialTimeSeriesDB, InstrumentType
+from bloomberg_fetcher import BloombergFetcher, get_or_setup_bloomberg_field
 from datetime import date
 
-# Create database
+# =============================================================================
+# Setup: Create database and instrument (one-time setup)
+# =============================================================================
+
 db = FinancialTimeSeriesDB("financial_data.db")
 
-# Add instrument
-apple = db.add_instrument(
-    ticker="AAPL",
-    name="Apple Inc.",
-    instrument_type=InstrumentType.STOCK
-)
+# Add instrument if it doesn't exist
+if not db.get_instrument_by_ticker("AAPL"):
+    db.add_instrument(
+        ticker="AAPL",
+        name="Apple Inc.",
+        instrument_type=InstrumentType.STOCK,
+        exchange="NASDAQ"
+    )
 
-# Option 1: Use convenience function
-field, config = setup_bloomberg_field(
+# Get or create field with Bloomberg config
+# This handles both new fields and existing fields
+field, config, was_created = get_or_setup_bloomberg_field(
     db=db,
-    instrument_id=apple.id,
-    field_name="price",
-    frequency=Frequency.DAILY,
     ticker="AAPL",
+    field_name="price",
+    frequency="daily",
     security_type="stock",
     exchange="US"
 )
 
-# Option 2: Manual configuration
-price_field = db.add_field(
-    instrument_id=apple.id,
-    field_name="price",
-    frequency=Frequency.DAILY
-)
+if was_created:
+    print("Created new field with Bloomberg config")
+else:
+    print(f"Found existing field (ID: {field.id})")
 
-bb_config = create_bloomberg_config(
-    ticker="AAPL",
-    field="PX_LAST",
-    security_type="stock",
-    exchange="US",
-    overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}
-)
+# =============================================================================
+# Daily workflow: Incremental data fetching
+# =============================================================================
 
-db.add_provider_config(
-    field_id=price_field.id,
-    provider=DataProvider.BLOOMBERG,
-    config=bb_config
-)
+with BloombergFetcher(db) as fetcher:
 
-# Fetch data from Bloomberg
-with BloombergFetcher(db, auto_connect=True) as fetcher:
-    # Fetch historical data
-    data = fetcher.fetch_historical_data(
-        field_id=field.id,
-        start_date=date(2024, 1, 1),
-        end_date=date(2024, 12, 31),
-        store=True
+    # Method 1: Use fetch_incremental_data (recommended)
+    # This automatically:
+    # - Looks up the field by ticker/field_name/frequency
+    # - Checks the latest date in the database
+    # - Fetches only missing data from Bloomberg
+    # - Stores the new data
+
+    data, info = fetcher.fetch_incremental_data(
+        ticker="AAPL",
+        field_name="price",
+        frequency="daily",
+        default_start_date=date(2020, 1, 1)  # Used only if DB is empty
     )
-    print(f"Fetched {len(data)} data points")
 
-    # Fetch current price
-    current = fetcher.fetch_reference_data(field.id, store=True)
-    print(f"Current price: ${current.value:.2f}")
+    if info["skipped"]:
+        print(f"Already up to date (latest: {info['latest_date']})")
+    else:
+        print(f"Fetched {len(data)} new points")
+        print(f"Date range: {info['start_date_used']} to {info['end_date_used']}")
 
-# Query stored data
+    # Method 2: Manual approach using get_bloomberg_field_info
+    # Useful when you need more control over the process
+
+    info = fetcher.get_bloomberg_field_info(
+        ticker="AAPL",
+        field_name="price",
+        frequency="daily"
+    )
+
+    if info:
+        print(f"Field ID: {info['field_id']}")
+        print(f"Latest date in DB: {info['latest_date']}")
+        print(f"Has data: {info['has_data']}")
+
+        # Check Bloomberg config
+        if info["bloomberg_config"]:
+            bb_config = info["bloomberg_config"].config
+            print(f"Bloomberg ticker: {bb_config['ticker']}")
+            print(f"Bloomberg field: {bb_config['field']}")
+
+            # Determine start date
+            if info["has_data"]:
+                from datetime import timedelta
+                start = info["latest_date"] + timedelta(days=1)
+            else:
+                start = date(2020, 1, 1)  # Default start
+
+            # Fetch and store
+            if start <= date.today():
+                data = fetcher.fetch_historical_data(
+                    field_id=info["field_id"],
+                    start_date=start,
+                    end_date=date.today(),
+                    store=True
+                )
+                print(f"Fetched {len(data)} points from {start}")
+    else:
+        print("Field not found - need to set it up first")
+
+# =============================================================================
+# Query the stored data
+# =============================================================================
+
 series = db.get_time_series(field.id)
-for point in series[-5:]:
-    print(f"{point.timestamp.date()}: ${point.value:.2f}")
+print(f"Total points in DB: {len(series)}")
+
+if series:
+    print("Latest 5 data points:")
+    for point in series[-5:]:
+        print(f"  {point.timestamp.date()}: ${point.value:.2f}")
 '''
     print(example_code)
 
