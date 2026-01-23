@@ -352,26 +352,27 @@ class BloombergFetcher:
 
     def get_bloomberg_field_info(
         self,
-        instrument_id: int,
+        ticker: str,
         field_name: str,
-        frequency,  # Frequency enum
+        frequency: str = "daily",
     ) -> Optional[dict]:
         """
         Retrieve field ID and Bloomberg config for an existing field.
 
-        This method looks up an existing field by (instrument_id, field_name, frequency)
+        This method looks up an existing field by (ticker, field_name, frequency)
         and returns its ID, Bloomberg configuration, and the latest date available in the DB.
 
         Args:
-            instrument_id: ID of the instrument
+            ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
             field_name: Name of the field (e.g., "price", "pct total return")
-            frequency: Data frequency (Frequency enum)
+            frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
 
         Returns:
-            Dictionary with field info, or None if field not found:
+            Dictionary with field info, or None if field/instrument not found:
             {
                 "field_id": int,
                 "field": InstrumentField,
+                "instrument": Instrument,
                 "bloomberg_config": ProviderConfig or None,
                 "latest_date": date or None,  # Latest date in DB, None if no data
                 "has_data": bool,
@@ -379,17 +380,33 @@ class BloombergFetcher:
 
         Example:
             info = fetcher.get_bloomberg_field_info(
-                instrument_id=apple.id,
+                ticker="AAPL",
                 field_name="price",
-                frequency=Frequency.DAILY
+                frequency="daily"
             )
             if info:
                 print(f"Field ID: {info['field_id']}")
                 print(f"Latest date in DB: {info['latest_date']}")
                 print(f"Bloomberg ticker: {info['bloomberg_config'].config['ticker']}")
         """
+        from financial_ts_db import Frequency
+
+        # Convert frequency string to enum
+        try:
+            freq_enum = Frequency(frequency.lower())
+        except ValueError:
+            raise ValueError(
+                f"Invalid frequency '{frequency}'. Valid options: "
+                f"{', '.join(f.value for f in Frequency)}"
+            )
+
+        # Look up instrument by ticker
+        instrument = self.db.get_instrument_by_ticker(ticker)
+        if not instrument:
+            return None
+
         # Get the field
-        field = self.db.get_field_by_name(instrument_id, field_name, frequency)
+        field = self.db.get_field_by_name(instrument.id, field_name, freq_enum)
         if not field:
             return None
 
@@ -413,6 +430,7 @@ class BloombergFetcher:
         return {
             "field_id": field.id,
             "field": field,
+            "instrument": instrument,
             "bloomberg_config": bloomberg_config,
             "latest_date": latest_date,
             "has_data": latest_date is not None,
@@ -420,9 +438,9 @@ class BloombergFetcher:
 
     def fetch_incremental_data(
         self,
-        instrument_id: int,
+        ticker: str,
         field_name: str,
-        frequency,  # Frequency enum
+        frequency: str = "daily",
         default_start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         store: bool = True
@@ -431,14 +449,14 @@ class BloombergFetcher:
         Fetch data incrementally, starting from the latest date in DB or a default start date.
 
         This is a convenience method that:
-        1. Looks up the existing field by (instrument_id, field_name, frequency)
+        1. Looks up the existing field by (ticker, field_name, frequency)
         2. Determines the start date (latest date in DB + 1 day, or default_start_date)
         3. Fetches and optionally stores the data
 
         Args:
-            instrument_id: ID of the instrument
+            ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
             field_name: Name of the field (e.g., "price", "pct total return")
-            frequency: Data frequency (Frequency enum)
+            frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
             default_start_date: Start date to use if no data exists in DB.
                                If None and no data exists, raises ValueError.
             end_date: End date for fetching (defaults to today)
@@ -454,9 +472,9 @@ class BloombergFetcher:
         Example:
             # Fetch price data, starting from 2020-01-01 if no data exists
             data, info = fetcher.fetch_incremental_data(
-                instrument_id=apple.id,
+                ticker="AAPL",
                 field_name="price",
-                frequency=Frequency.DAILY,
+                frequency="daily",
                 default_start_date=date(2020, 1, 1)
             )
             print(f"Fetched {len(data)} new points")
@@ -465,10 +483,10 @@ class BloombergFetcher:
         from datetime import timedelta
 
         # Get field info
-        info = self.get_bloomberg_field_info(instrument_id, field_name, frequency)
+        info = self.get_bloomberg_field_info(ticker, field_name, frequency)
         if not info:
             raise ValueError(
-                f"Field not found: instrument_id={instrument_id}, "
+                f"Field not found: ticker={ticker}, "
                 f"field_name={field_name}, frequency={frequency}"
             )
 
@@ -847,10 +865,9 @@ def create_bloomberg_config(
 
 def get_or_setup_bloomberg_field(
     db: FinancialTimeSeriesDB,
-    instrument_id: int,
-    field_name: str,
-    frequency,  # Frequency enum
     ticker: str,
+    field_name: str,
+    frequency: str = "daily",
     bloomberg_field: Optional[str] = None,
     security_type: str = "stock",
     exchange: str = "US",
@@ -861,16 +878,15 @@ def get_or_setup_bloomberg_field(
     Get an existing Bloomberg field or create it if it doesn't exist.
 
     This is a convenience function that handles the common pattern of:
-    - Check if a field already exists for this (instrument, field_name, frequency)
+    - Check if a field already exists for this (ticker, field_name, frequency)
     - If it exists, return it along with its Bloomberg config
     - If it doesn't exist, create it with the provided Bloomberg settings
 
     Args:
         db: FinancialTimeSeriesDB instance
-        instrument_id: ID of the instrument
+        ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
         field_name: Name for the field (e.g., "price")
-        frequency: Data frequency (Frequency enum)
-        ticker: Base ticker symbol (used only if creating new field)
+        frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
         bloomberg_field: Bloomberg field name (auto-mapped if not provided)
         security_type: Type of security (used only if creating new field)
         exchange: Exchange code (used only if creating new field)
@@ -881,13 +897,15 @@ def get_or_setup_bloomberg_field(
         Tuple of (InstrumentField, ProviderConfig, was_created)
         - was_created is True if the field was newly created, False if it already existed
 
+    Raises:
+        ValueError: If instrument not found by ticker
+
     Example:
         field, config, created = get_or_setup_bloomberg_field(
             db=db,
-            instrument_id=apple.id,
-            field_name="price",
-            frequency=Frequency.DAILY,
             ticker="AAPL",
+            field_name="price",
+            frequency="daily",
             security_type="stock",
             exchange="US"
         )
@@ -896,8 +914,24 @@ def get_or_setup_bloomberg_field(
         else:
             print(f"Found existing field with ID {field.id}")
     """
+    from financial_ts_db import Frequency
+
+    # Convert frequency string to enum
+    try:
+        freq_enum = Frequency(frequency.lower())
+    except ValueError:
+        raise ValueError(
+            f"Invalid frequency '{frequency}'. Valid options: "
+            f"{', '.join(f.value for f in Frequency)}"
+        )
+
+    # Look up instrument by ticker
+    instrument = db.get_instrument_by_ticker(ticker)
+    if not instrument:
+        raise ValueError(f"Instrument not found with ticker: {ticker}")
+
     # Check if field already exists
-    existing_field = db.get_field_by_name(instrument_id, field_name, frequency)
+    existing_field = db.get_field_by_name(instrument.id, field_name, freq_enum)
 
     if existing_field:
         # Field exists, get its Bloomberg config
@@ -929,9 +963,9 @@ def get_or_setup_bloomberg_field(
     # Field doesn't exist, create it
     field, config = setup_bloomberg_field(
         db=db,
-        instrument_id=instrument_id,
+        instrument_id=instrument.id,
         field_name=field_name,
-        frequency=frequency,
+        frequency=freq_enum,
         ticker=ticker,
         bloomberg_field=bloomberg_field,
         security_type=security_type,
