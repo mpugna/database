@@ -350,6 +350,175 @@ class BloombergFetcher:
 
         return data_point
 
+    def get_bloomberg_field_info(
+        self,
+        instrument_id: int,
+        field_name: str,
+        frequency,  # Frequency enum
+    ) -> Optional[dict]:
+        """
+        Retrieve field ID and Bloomberg config for an existing field.
+
+        This method looks up an existing field by (instrument_id, field_name, frequency)
+        and returns its ID, Bloomberg configuration, and the latest date available in the DB.
+
+        Args:
+            instrument_id: ID of the instrument
+            field_name: Name of the field (e.g., "price", "pct total return")
+            frequency: Data frequency (Frequency enum)
+
+        Returns:
+            Dictionary with field info, or None if field not found:
+            {
+                "field_id": int,
+                "field": InstrumentField,
+                "bloomberg_config": ProviderConfig or None,
+                "latest_date": date or None,  # Latest date in DB, None if no data
+                "has_data": bool,
+            }
+
+        Example:
+            info = fetcher.get_bloomberg_field_info(
+                instrument_id=apple.id,
+                field_name="price",
+                frequency=Frequency.DAILY
+            )
+            if info:
+                print(f"Field ID: {info['field_id']}")
+                print(f"Latest date in DB: {info['latest_date']}")
+                print(f"Bloomberg ticker: {info['bloomberg_config'].config['ticker']}")
+        """
+        # Get the field
+        field = self.db.get_field_by_name(instrument_id, field_name, frequency)
+        if not field:
+            return None
+
+        # Get Bloomberg config
+        configs = self.db.get_provider_configs_for_field(field.id, active_only=True)
+        bloomberg_config = None
+        for config in configs:
+            if config.provider == DataProvider.BLOOMBERG:
+                bloomberg_config = config
+                break
+
+        # Get latest date in DB
+        latest_point = self.db.get_latest_value(field.id, resolve_alias=False)
+        latest_date = None
+        if latest_point:
+            if isinstance(latest_point.timestamp, datetime):
+                latest_date = latest_point.timestamp.date()
+            else:
+                latest_date = latest_point.timestamp
+
+        return {
+            "field_id": field.id,
+            "field": field,
+            "bloomberg_config": bloomberg_config,
+            "latest_date": latest_date,
+            "has_data": latest_date is not None,
+        }
+
+    def fetch_incremental_data(
+        self,
+        instrument_id: int,
+        field_name: str,
+        frequency,  # Frequency enum
+        default_start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        store: bool = True
+    ) -> tuple[list[BloombergDataPoint], dict]:
+        """
+        Fetch data incrementally, starting from the latest date in DB or a default start date.
+
+        This is a convenience method that:
+        1. Looks up the existing field by (instrument_id, field_name, frequency)
+        2. Determines the start date (latest date in DB + 1 day, or default_start_date)
+        3. Fetches and optionally stores the data
+
+        Args:
+            instrument_id: ID of the instrument
+            field_name: Name of the field (e.g., "price", "pct total return")
+            frequency: Data frequency (Frequency enum)
+            default_start_date: Start date to use if no data exists in DB.
+                               If None and no data exists, raises ValueError.
+            end_date: End date for fetching (defaults to today)
+            store: If True, automatically store fetched data in the database
+
+        Returns:
+            Tuple of (list of BloombergDataPoint, info dict with field details)
+
+        Raises:
+            ValueError: If field not found, no Bloomberg config, or no default_start_date
+                       when DB is empty
+
+        Example:
+            # Fetch price data, starting from 2020-01-01 if no data exists
+            data, info = fetcher.fetch_incremental_data(
+                instrument_id=apple.id,
+                field_name="price",
+                frequency=Frequency.DAILY,
+                default_start_date=date(2020, 1, 1)
+            )
+            print(f"Fetched {len(data)} new points")
+            print(f"Started from: {info['start_date_used']}")
+        """
+        from datetime import timedelta
+
+        # Get field info
+        info = self.get_bloomberg_field_info(instrument_id, field_name, frequency)
+        if not info:
+            raise ValueError(
+                f"Field not found: instrument_id={instrument_id}, "
+                f"field_name={field_name}, frequency={frequency}"
+            )
+
+        if not info["bloomberg_config"]:
+            raise ValueError(
+                f"No active Bloomberg config found for field ID {info['field_id']}"
+            )
+
+        # Determine start date
+        if info["has_data"]:
+            # Start from the day after the latest data point
+            start_date = info["latest_date"] + timedelta(days=1)
+        elif default_start_date:
+            start_date = default_start_date
+        else:
+            raise ValueError(
+                f"No data exists in DB for field ID {info['field_id']} and no "
+                f"default_start_date was provided"
+            )
+
+        end_date = end_date or date.today()
+
+        # Check if we actually need to fetch
+        if start_date > end_date:
+            logger.info(
+                f"No new data to fetch for field {field_name}: "
+                f"DB is up to date through {info['latest_date']}"
+            )
+            return [], {
+                **info,
+                "start_date_used": start_date,
+                "end_date_used": end_date,
+                "skipped": True,
+            }
+
+        # Fetch the data
+        data_points = self.fetch_historical_data(
+            field_id=info["field_id"],
+            start_date=start_date,
+            end_date=end_date,
+            store=store
+        )
+
+        return data_points, {
+            **info,
+            "start_date_used": start_date,
+            "end_date_used": end_date,
+            "skipped": False,
+        }
+
     def fetch_all_instrument_data(
         self,
         instrument_id: int,
@@ -675,6 +844,103 @@ def create_bloomberg_config(
 # =============================================================================
 # Convenience Functions for Database Integration
 # =============================================================================
+
+def get_or_setup_bloomberg_field(
+    db: FinancialTimeSeriesDB,
+    instrument_id: int,
+    field_name: str,
+    frequency,  # Frequency enum
+    ticker: str,
+    bloomberg_field: Optional[str] = None,
+    security_type: str = "stock",
+    exchange: str = "US",
+    description: str = "",
+    priority: int = 0
+) -> tuple[InstrumentField, ProviderConfig, bool]:
+    """
+    Get an existing Bloomberg field or create it if it doesn't exist.
+
+    This is a convenience function that handles the common pattern of:
+    - Check if a field already exists for this (instrument, field_name, frequency)
+    - If it exists, return it along with its Bloomberg config
+    - If it doesn't exist, create it with the provided Bloomberg settings
+
+    Args:
+        db: FinancialTimeSeriesDB instance
+        instrument_id: ID of the instrument
+        field_name: Name for the field (e.g., "price")
+        frequency: Data frequency (Frequency enum)
+        ticker: Base ticker symbol (used only if creating new field)
+        bloomberg_field: Bloomberg field name (auto-mapped if not provided)
+        security_type: Type of security (used only if creating new field)
+        exchange: Exchange code (used only if creating new field)
+        description: Field description (used only if creating new field)
+        priority: Provider priority (used only if creating new field)
+
+    Returns:
+        Tuple of (InstrumentField, ProviderConfig, was_created)
+        - was_created is True if the field was newly created, False if it already existed
+
+    Example:
+        field, config, created = get_or_setup_bloomberg_field(
+            db=db,
+            instrument_id=apple.id,
+            field_name="price",
+            frequency=Frequency.DAILY,
+            ticker="AAPL",
+            security_type="stock",
+            exchange="US"
+        )
+        if created:
+            print("Created new field")
+        else:
+            print(f"Found existing field with ID {field.id}")
+    """
+    # Check if field already exists
+    existing_field = db.get_field_by_name(instrument_id, field_name, frequency)
+
+    if existing_field:
+        # Field exists, get its Bloomberg config
+        configs = db.get_provider_configs_for_field(existing_field.id, active_only=True)
+        bloomberg_config = None
+        for config in configs:
+            if config.provider == DataProvider.BLOOMBERG:
+                bloomberg_config = config
+                break
+
+        if not bloomberg_config:
+            # Field exists but has no Bloomberg config - add one
+            bb_field = bloomberg_field or get_bloomberg_field(field_name)
+            config_dict = create_bloomberg_config(
+                ticker=ticker,
+                field=bb_field,
+                security_type=security_type,
+                exchange=exchange
+            )
+            bloomberg_config = db.add_provider_config(
+                field_id=existing_field.id,
+                provider=DataProvider.BLOOMBERG,
+                config=config_dict,
+                priority=priority
+            )
+
+        return existing_field, bloomberg_config, False
+
+    # Field doesn't exist, create it
+    field, config = setup_bloomberg_field(
+        db=db,
+        instrument_id=instrument_id,
+        field_name=field_name,
+        frequency=frequency,
+        ticker=ticker,
+        bloomberg_field=bloomberg_field,
+        security_type=security_type,
+        exchange=exchange,
+        description=description,
+        priority=priority
+    )
+    return field, config, True
+
 
 def setup_bloomberg_field(
     db: FinancialTimeSeriesDB,
