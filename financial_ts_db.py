@@ -73,6 +73,18 @@ class DataProvider(Enum):
 
 
 # =============================================================================
+# Storable Fields Registry
+# =============================================================================
+
+# Default storable fields that are allowed in the database.
+# Users can add or remove fields from this set via the database instance methods.
+DEFAULT_STORABLE_FIELDS: set[str] = {
+    "price",
+    "pct total return",
+}
+
+
+# =============================================================================
 # Data Classes
 # =============================================================================
 
@@ -282,16 +294,28 @@ class FinancialTimeSeriesDB:
         )
     """
 
-    def __init__(self, db_path: str | Path = ":memory:"):
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        storable_fields: Optional[set[str]] = None
+    ):
         """
         Initialize the database connection.
 
         Args:
             db_path: Path to the SQLite database file. Use ":memory:" for in-memory database.
+            storable_fields: Optional set of allowed field names. If None, uses DEFAULT_STORABLE_FIELDS.
+                            Pass an empty set to disable field name validation.
         """
         self.db_path = Path(db_path) if db_path != ":memory:" else db_path
         self._is_memory = db_path == ":memory:"
         self._persistent_conn: Optional[sqlite3.Connection] = None
+
+        # Initialize storable fields registry (case-insensitive storage)
+        if storable_fields is not None:
+            self._storable_fields: set[str] = {f.lower() for f in storable_fields}
+        else:
+            self._storable_fields = {f.lower() for f in DEFAULT_STORABLE_FIELDS}
 
         # For in-memory databases, we need a persistent connection
         if self._is_memory:
@@ -329,6 +353,102 @@ class FinancialTimeSeriesDB:
                 yield conn
             finally:
                 conn.close()
+
+    # =========================================================================
+    # Storable Fields Management
+    # =========================================================================
+
+    def get_storable_fields(self) -> set[str]:
+        """
+        Get the current set of allowed storable field names.
+
+        Returns:
+            Set of allowed field names (lowercase)
+        """
+        return self._storable_fields.copy()
+
+    def add_storable_field(self, field_name: str) -> None:
+        """
+        Add a new field name to the list of allowed storable fields.
+
+        Args:
+            field_name: The field name to allow (case-insensitive)
+
+        Example:
+            db.add_storable_field("dividend yield")
+            db.add_storable_field("EPS")  # Stored as "eps"
+        """
+        normalized = field_name.lower()
+        if normalized not in self._storable_fields:
+            self._storable_fields.add(normalized)
+            logger.info(f"Added storable field: {normalized}")
+
+    def remove_storable_field(self, field_name: str) -> bool:
+        """
+        Remove a field name from the list of allowed storable fields.
+
+        Note: This does not delete existing fields with this name from the database.
+        It only prevents new fields with this name from being added.
+
+        Args:
+            field_name: The field name to remove (case-insensitive)
+
+        Returns:
+            True if the field was removed, False if it wasn't in the list
+        """
+        normalized = field_name.lower()
+        if normalized in self._storable_fields:
+            self._storable_fields.discard(normalized)
+            logger.info(f"Removed storable field: {normalized}")
+            return True
+        return False
+
+    def is_storable_field(self, field_name: str) -> bool:
+        """
+        Check if a field name is in the allowed storable fields list.
+
+        Args:
+            field_name: The field name to check (case-insensitive)
+
+        Returns:
+            True if the field name is allowed, False otherwise
+        """
+        return field_name.lower() in self._storable_fields
+
+    def set_storable_fields(self, field_names: set[str]) -> None:
+        """
+        Replace the entire set of allowed storable fields.
+
+        Args:
+            field_names: New set of allowed field names
+
+        Example:
+            db.set_storable_fields({"price", "volume", "open", "high", "low", "close"})
+        """
+        self._storable_fields = {f.lower() for f in field_names}
+        logger.info(f"Set storable fields to: {self._storable_fields}")
+
+    def validate_field_name(self, field_name: str) -> None:
+        """
+        Validate that a field name is in the allowed storable fields list.
+
+        Args:
+            field_name: The field name to validate
+
+        Raises:
+            ValueError: If the field name is not in the allowed list
+        """
+        if not self._storable_fields:
+            # If storable fields is empty, validation is disabled
+            return
+
+        if not self.is_storable_field(field_name):
+            allowed = ", ".join(sorted(self._storable_fields))
+            raise ValueError(
+                f"Field name '{field_name}' is not in the allowed storable fields list. "
+                f"Allowed fields: {allowed}. "
+                f"Use db.add_storable_field('{field_name.lower()}') to allow this field."
+            )
 
     # =========================================================================
     # Instrument Operations
@@ -739,9 +859,13 @@ class FinancialTimeSeriesDB:
             The created InstrumentField object
 
         Raises:
-            ValueError: If alias_instrument_id is set without alias_field_id or vice versa
+            ValueError: If alias_instrument_id is set without alias_field_id or vice versa,
+                        or if field_name is not in the allowed storable fields list
             sqlite3.IntegrityError: If field already exists for this instrument/frequency
         """
+        # Validate field name against storable fields registry
+        self.validate_field_name(field_name)
+
         if (alias_instrument_id is None) != (alias_field_id is None):
             raise ValueError(
                 "Both alias_instrument_id and alias_field_id must be set together, or neither"
@@ -1584,17 +1708,22 @@ class FinancialTimeSeriesDB:
 # Convenience Functions
 # =============================================================================
 
-def create_database(db_path: str | Path = ":memory:") -> FinancialTimeSeriesDB:
+def create_database(
+    db_path: str | Path = ":memory:",
+    storable_fields: Optional[set[str]] = None
+) -> FinancialTimeSeriesDB:
     """
     Create a new financial time series database.
 
     Args:
         db_path: Path to the database file or ":memory:" for in-memory database
+        storable_fields: Optional set of allowed field names. If None, uses DEFAULT_STORABLE_FIELDS.
+                        Pass an empty set to disable field name validation.
 
     Returns:
         FinancialTimeSeriesDB instance
     """
-    return FinancialTimeSeriesDB(db_path)
+    return FinancialTimeSeriesDB(db_path, storable_fields=storable_fields)
 
 
 def print_deletion_impact(impact: DeletionImpact) -> None:

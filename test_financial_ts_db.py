@@ -14,14 +14,21 @@ from financial_ts_db import (
     InstrumentType,
     DataProvider,
     create_database,
+    DEFAULT_STORABLE_FIELDS,
 )
+
+
+# Helper to create database with validation disabled for tests
+def create_test_database():
+    """Create a test database with storable field validation disabled."""
+    return create_database(":memory:", storable_fields=set())
 
 
 class TestInstrumentOperations(unittest.TestCase):
     """Test instrument CRUD operations."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
 
     def tearDown(self):
         self.db.close()
@@ -195,7 +202,7 @@ class TestFieldOperations(unittest.TestCase):
     """Test field CRUD operations."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
         self.instrument = self.db.add_instrument(
             ticker="TEST",
             name="Test Instrument",
@@ -249,7 +256,7 @@ class TestAliasFields(unittest.TestCase):
     """Test alias field functionality."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
 
         # Create two instruments
         self.spx = self.db.add_instrument(
@@ -346,7 +353,7 @@ class TestProviderConfig(unittest.TestCase):
     """Test data provider configuration."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
         self.instrument = self.db.add_instrument(
             "AAPL", "Apple", InstrumentType.STOCK
         )
@@ -399,7 +406,7 @@ class TestTimeSeries(unittest.TestCase):
     """Test time series data operations."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
         self.instrument = self.db.add_instrument(
             "AAPL", "Apple", InstrumentType.STOCK
         )
@@ -493,7 +500,7 @@ class TestDeletionPreview(unittest.TestCase):
     """Test deletion preview/simulation functionality."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
 
     def tearDown(self):
         self.db.close()
@@ -579,7 +586,7 @@ class TestCascadeDeletes(unittest.TestCase):
     """Test cascade deletion behavior."""
 
     def setUp(self):
-        self.db = create_database(":memory:")
+        self.db = create_test_database()
 
     def tearDown(self):
         self.db.close()
@@ -611,6 +618,129 @@ class TestCascadeDeletes(unittest.TestCase):
         # Field and related data gone, but instrument remains
         self.assertIsNone(self.db.get_field(field.id))
         self.assertIsNotNone(self.db.get_instrument(instrument.id))
+
+
+class TestStorableFields(unittest.TestCase):
+    """Test storable fields validation functionality."""
+
+    def test_default_storable_fields(self):
+        """Test that default storable fields are set correctly."""
+        db = create_database()
+        storable = db.get_storable_fields()
+
+        self.assertIn("price", storable)
+        self.assertIn("pct total return", storable)
+        db.close()
+
+    def test_add_field_with_valid_name(self):
+        """Test adding a field with a valid storable field name."""
+        db = create_database()
+        instrument = db.add_instrument("TEST", "Test", InstrumentType.STOCK)
+
+        # "price" is in the default storable fields
+        field = db.add_field(instrument.id, "price", Frequency.DAILY)
+        self.assertIsNotNone(field.id)
+
+        # Case insensitive - "PRICE" should also work
+        field2 = db.add_field(instrument.id, "PRICE", Frequency.WEEKLY)
+        self.assertIsNotNone(field2.id)
+        db.close()
+
+    def test_add_field_with_invalid_name_raises(self):
+        """Test that adding a field with an invalid name raises ValueError."""
+        db = create_database()
+        instrument = db.add_instrument("TEST", "Test", InstrumentType.STOCK)
+
+        with self.assertRaises(ValueError) as context:
+            db.add_field(instrument.id, "INVALID_FIELD", Frequency.DAILY)
+
+        self.assertIn("not in the allowed storable fields", str(context.exception))
+        db.close()
+
+    def test_add_storable_field(self):
+        """Test adding a new storable field."""
+        db = create_database()
+        instrument = db.add_instrument("TEST", "Test", InstrumentType.STOCK)
+
+        # Initially should fail
+        with self.assertRaises(ValueError):
+            db.add_field(instrument.id, "volume", Frequency.DAILY)
+
+        # Add to storable fields
+        db.add_storable_field("volume")
+        self.assertTrue(db.is_storable_field("volume"))
+
+        # Now it should work
+        field = db.add_field(instrument.id, "volume", Frequency.DAILY)
+        self.assertIsNotNone(field.id)
+        db.close()
+
+    def test_remove_storable_field(self):
+        """Test removing a storable field."""
+        db = create_database()
+
+        self.assertTrue(db.is_storable_field("price"))
+        result = db.remove_storable_field("price")
+        self.assertTrue(result)
+        self.assertFalse(db.is_storable_field("price"))
+
+        # Removing again returns False
+        result = db.remove_storable_field("price")
+        self.assertFalse(result)
+        db.close()
+
+    def test_set_storable_fields(self):
+        """Test replacing all storable fields."""
+        db = create_database()
+
+        new_fields = {"open", "high", "low", "close", "volume"}
+        db.set_storable_fields(new_fields)
+
+        storable = db.get_storable_fields()
+        self.assertEqual(storable, new_fields)
+        self.assertFalse(db.is_storable_field("price"))
+        self.assertTrue(db.is_storable_field("volume"))
+        db.close()
+
+    def test_empty_storable_fields_disables_validation(self):
+        """Test that empty storable fields set disables validation."""
+        db = create_database(storable_fields=set())
+        instrument = db.add_instrument("TEST", "Test", InstrumentType.STOCK)
+
+        # Any field name should work
+        field = db.add_field(instrument.id, "ANY_RANDOM_NAME", Frequency.DAILY)
+        self.assertIsNotNone(field.id)
+        db.close()
+
+    def test_custom_storable_fields_on_init(self):
+        """Test passing custom storable fields at initialization."""
+        custom_fields = {"open", "high", "low", "close"}
+        db = create_database(storable_fields=custom_fields)
+        instrument = db.add_instrument("TEST", "Test", InstrumentType.STOCK)
+
+        # Custom field should work
+        field = db.add_field(instrument.id, "open", Frequency.DAILY)
+        self.assertIsNotNone(field.id)
+
+        # Default field should not work
+        with self.assertRaises(ValueError):
+            db.add_field(instrument.id, "price", Frequency.DAILY)
+        db.close()
+
+    def test_case_insensitive_matching(self):
+        """Test that storable field matching is case-insensitive."""
+        db = create_database()
+        instrument = db.add_instrument("TEST", "Test", InstrumentType.STOCK)
+
+        # All these should work for "price"
+        db.add_field(instrument.id, "price", Frequency.DAILY)
+        db.add_field(instrument.id, "PRICE", Frequency.WEEKLY)
+        db.add_field(instrument.id, "Price", Frequency.MONTHLY)
+        db.add_field(instrument.id, "PrIcE", Frequency.YEARLY)
+
+        fields = db.list_fields(instrument_id=instrument.id)
+        self.assertEqual(len(fields), 4)
+        db.close()
 
 
 if __name__ == "__main__":
