@@ -4,6 +4,9 @@ Financial Time Series Database Interface
 A SQLite-based database for storing and managing financial time series data,
 including instruments, fields, aliases, and data provider configurations.
 
+All public methods use string identifiers (ticker, field_name, frequency)
+instead of numeric IDs for a cleaner API.
+
 Requires Python 3.9+
 
 Author: Claude
@@ -18,7 +21,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, date
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, Union
 from contextlib import contextmanager
 
 # Configure logging
@@ -165,7 +168,6 @@ class TimeSeriesPoint:
 class DeletionImpact:
     """Describes the impact of a deletion operation."""
     target_type: str = ""
-    target_id: int = 0
     target_name: str = ""
     fields_to_delete: list = field(default_factory=list)
     aliases_to_delete: list = field(default_factory=list)
@@ -287,12 +289,32 @@ END;
 
 
 # =============================================================================
+# Helper function for frequency conversion
+# =============================================================================
+
+def _to_frequency(frequency: Union[str, Frequency]) -> Frequency:
+    """Convert string or Frequency enum to Frequency enum."""
+    if isinstance(frequency, Frequency):
+        return frequency
+    try:
+        return Frequency(frequency.lower())
+    except ValueError:
+        raise ValueError(
+            f"Invalid frequency '{frequency}'. Valid options: "
+            f"{', '.join(f.value for f in Frequency)}"
+        )
+
+
+# =============================================================================
 # Main Database Class
 # =============================================================================
 
 class FinancialTimeSeriesDB:
     """
     Interface for the Financial Time Series SQLite Database.
+
+    All public methods use string identifiers (ticker, field_name, frequency)
+    instead of numeric IDs for a cleaner, more intuitive API.
 
     This class provides methods to:
     - Manage instruments (add, update, delete, query)
@@ -320,14 +342,25 @@ class FinancialTimeSeriesDB:
         price_field = db.add_field(
             ticker="AAPL",
             field_name="price",
-            frequency=Frequency.DAILY
+            frequency="daily"
         )
 
-        # Configure provider
+        # Configure provider using string identifiers
         db.add_provider_config(
-            field_id=price_field.id,
+            ticker="AAPL",
+            field_name="price",
+            frequency="daily",
             provider=DataProvider.BLOOMBERG,
             config={"ticker": "AAPL US Equity", "field": "PX_LAST"}
+        )
+
+        # Add time series data
+        db.add_time_series_point(
+            ticker="AAPL",
+            field_name="price",
+            frequency="daily",
+            timestamp=datetime.now(),
+            value=150.0
         )
     """
 
@@ -429,6 +462,67 @@ class FinancialTimeSeriesDB:
                 yield conn
             finally:
                 conn.close()
+
+    # =========================================================================
+    # Internal ID lookup helpers
+    # =========================================================================
+
+    def _get_instrument_id(self, ticker: str) -> int:
+        """Get instrument ID by ticker, raising ValueError if not found."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM instruments WHERE ticker = ?",
+                (ticker,)
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Instrument not found with ticker: {ticker}")
+            return row['id']
+
+    def _get_field_id(
+        self,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency]
+    ) -> int:
+        """Get field ID by ticker, field_name, frequency, raising ValueError if not found."""
+        freq = _to_frequency(frequency)
+        instrument_id = self._get_instrument_id(ticker)
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM instrument_fields
+                WHERE instrument_id = ? AND field_name = ? AND frequency = ?
+                """,
+                (instrument_id, field_name, freq.value)
+            ).fetchone()
+            if not row:
+                raise ValueError(
+                    f"Field not found: ticker={ticker}, field_name={field_name}, frequency={freq.value}"
+                )
+            return row['id']
+
+    def _get_field_by_id(self, field_id: int) -> Optional[InstrumentField]:
+        """Get a field by its internal ID (for internal use)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instrument_fields WHERE id = ?",
+                (field_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_field(row)
+            return None
+
+    def _get_instrument_by_id(self, instrument_id: int) -> Optional[Instrument]:
+        """Get an instrument by its internal ID (for internal use)."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM instruments WHERE id = ?",
+                (instrument_id,)
+            ).fetchone()
+            if row:
+                return self._row_to_instrument(row)
+            return None
 
     # =========================================================================
     # Storable Fields Management
@@ -628,24 +722,20 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-            instrument = self.get_instrument(cursor.lastrowid)
-            logger.info(f"Added instrument: {ticker} (ID: {instrument.id})")
+            instrument = self.get_instrument(ticker)
+            logger.info(f"Added instrument: {ticker}")
             return instrument
 
-    def get_instrument(self, instrument_id: int) -> Optional[Instrument]:
-        """Get an instrument by ID."""
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM instruments WHERE id = ?",
-                (instrument_id,)
-            ).fetchone()
+    def get_instrument(self, ticker: str) -> Optional[Instrument]:
+        """
+        Get an instrument by ticker symbol.
 
-            if row:
-                return self._row_to_instrument(row)
-            return None
+        Args:
+            ticker: The ticker symbol
 
-    def get_instrument_by_ticker(self, ticker: str) -> Optional[Instrument]:
-        """Get an instrument by ticker symbol."""
+        Returns:
+            Instrument if found, None otherwise
+        """
         with self._get_connection() as conn:
             row = conn.execute(
                 "SELECT * FROM instruments WHERE ticker = ?",
@@ -690,26 +780,30 @@ class FinancialTimeSeriesDB:
 
     def update_instrument(
         self,
-        instrument_id: int,
+        ticker: str,
         **kwargs
     ) -> Optional[Instrument]:
         """
         Update an instrument's attributes.
 
         Args:
-            instrument_id: ID of the instrument to update
-            **kwargs: Attributes to update (ticker, name, instrument_type,
+            ticker: Ticker of the instrument to update
+            **kwargs: Attributes to update (name, instrument_type,
                       description, currency, exchange, metadata, extra_data)
 
         Returns:
             Updated Instrument or None if not found
         """
-        allowed_fields = {'ticker', 'name', 'instrument_type', 'description',
+        instrument = self.get_instrument(ticker)
+        if not instrument:
+            return None
+
+        allowed_fields = {'name', 'instrument_type', 'description',
                           'currency', 'exchange', 'metadata', 'extra_data'}
 
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
         if not updates:
-            return self.get_instrument(instrument_id)
+            return instrument
 
         # Handle special conversions
         if 'instrument_type' in updates and isinstance(updates['instrument_type'], InstrumentType):
@@ -720,7 +814,7 @@ class FinancialTimeSeriesDB:
             updates['extra_data'] = json.dumps(updates['extra_data'])
 
         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-        values = list(updates.values()) + [instrument_id]
+        values = list(updates.values()) + [instrument.id]
 
         with self._get_connection() as conn:
             conn.execute(
@@ -729,23 +823,20 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-        logger.info(f"Updated instrument ID: {instrument_id}")
-        return self.get_instrument(instrument_id)
+        logger.info(f"Updated instrument: {ticker}")
+        return self.get_instrument(ticker)
 
     def update_instrument_extra_data(
         self,
-        instrument_id: int,
+        ticker: str,
         data: dict,
         merge: bool = True
     ) -> Optional[Instrument]:
         """
         Update an instrument's extra_data JSON field.
 
-        This method provides convenient partial updates to the extra_data field,
-        allowing you to merge new data with existing data or replace it entirely.
-
         Args:
-            instrument_id: ID of the instrument to update
+            ticker: Ticker of the instrument to update
             data: Dictionary of data to add/update
             merge: If True, merge with existing data (default). If False, replace entirely.
 
@@ -753,45 +844,36 @@ class FinancialTimeSeriesDB:
             Updated Instrument or None if not found
 
         Example:
-            # Merge new fields with existing extra_data
-            db.update_instrument_extra_data(1, {"sector": "Technology", "beta": 1.2})
-
-            # Later, add more fields (existing fields preserved)
-            db.update_instrument_extra_data(1, {"pe_ratio": 25.5})
-
-            # Replace all extra_data entirely
-            db.update_instrument_extra_data(1, {"new_field": "value"}, merge=False)
+            db.update_instrument_extra_data("AAPL", {"sector": "Technology", "beta": 1.2})
         """
-        instrument = self.get_instrument(instrument_id)
+        instrument = self.get_instrument(ticker)
         if not instrument:
             return None
 
         if merge:
-            # Merge new data with existing data
             existing = instrument.extra_data or {}
             new_data = {**existing, **data}
         else:
-            # Replace entirely
             new_data = data
 
-        return self.update_instrument(instrument_id, extra_data=new_data)
+        return self.update_instrument(ticker, extra_data=new_data)
 
     def get_instrument_extra_data(
         self,
-        instrument_id: int,
+        ticker: str,
         key: Optional[str] = None
-    ) -> Optional[dict]:
+    ) -> Optional[Any]:
         """
         Get an instrument's extra_data or a specific key from it.
 
         Args:
-            instrument_id: ID of the instrument
+            ticker: Ticker of the instrument
             key: Optional specific key to retrieve. If None, returns all extra_data.
 
         Returns:
             The extra_data dict, a specific value, or None if instrument not found
         """
-        instrument = self.get_instrument(instrument_id)
+        instrument = self.get_instrument(ticker)
         if not instrument:
             return None
 
@@ -802,44 +884,42 @@ class FinancialTimeSeriesDB:
 
     def delete_instrument(
         self,
-        instrument_id: int,
+        ticker: str,
         dry_run: bool = False,
         print_output: bool = True
     ) -> DeletionImpact:
         """
         Delete an instrument and all related data.
 
-        This will:
-        - Delete all fields of this instrument
-        - Delete all provider configs for those fields
-        - Delete all time series data for those fields
-        - Set alias references to NULL and warn about affected aliases
-
         Args:
-            instrument_id: ID of the instrument to delete
+            ticker: Ticker of the instrument to delete
             dry_run: If True, only simulate and return impact without deleting
             print_output: If True and dry_run is True, print impact report to stdout
 
         Returns:
             DeletionImpact object describing what was/would be deleted
         """
-        impact = self._calculate_instrument_deletion_impact(instrument_id)
+        instrument = self.get_instrument(ticker)
+        if not instrument:
+            return DeletionImpact(
+                target_type="instrument",
+                target_name=ticker,
+                warnings=["Instrument not found"]
+            )
+
+        impact = self._calculate_instrument_deletion_impact(instrument.id)
 
         if dry_run:
-            logger.info(f"DRY RUN - Would delete instrument ID: {instrument_id}")
+            logger.info(f"DRY RUN - Would delete instrument: {ticker}")
             if print_output:
                 print_deletion_impact(impact)
             return impact
 
-        # Log warnings about aliases that will be broken
         for warning in impact.warnings:
             logger.warning(warning)
 
         with self._get_connection() as conn:
-            # The CASCADE will handle fields and their provider configs
-            # But we need to handle the aliases pointing TO this instrument
-
-            # First, get all fields that are aliases pointing to this instrument's fields
+            # First, delete alias fields pointing to this instrument
             alias_fields = conn.execute(
                 """
                 SELECT if2.id, if2.instrument_id, i.ticker, if2.field_name
@@ -847,10 +927,9 @@ class FinancialTimeSeriesDB:
                 JOIN instruments i ON if2.instrument_id = i.id
                 WHERE if2.alias_instrument_id = ?
                 """,
-                (instrument_id,)
+                (instrument.id,)
             ).fetchall()
 
-            # Delete the alias fields (or set to NULL - choosing delete here for cleaner state)
             for alias in alias_fields:
                 conn.execute(
                     "DELETE FROM instrument_fields WHERE id = ?",
@@ -862,26 +941,24 @@ class FinancialTimeSeriesDB:
                 )
 
             # Now delete the instrument (CASCADE will handle the rest)
-            conn.execute("DELETE FROM instruments WHERE id = ?", (instrument_id,))
+            conn.execute("DELETE FROM instruments WHERE id = ?", (instrument.id,))
             conn.commit()
 
-        logger.info(f"Deleted instrument ID: {instrument_id}")
+        logger.info(f"Deleted instrument: {ticker}")
         return impact
 
     def _calculate_instrument_deletion_impact(self, instrument_id: int) -> DeletionImpact:
         """Calculate the impact of deleting an instrument."""
-        instrument = self.get_instrument(instrument_id)
+        instrument = self._get_instrument_by_id(instrument_id)
         if not instrument:
             return DeletionImpact(
                 target_type="instrument",
-                target_id=instrument_id,
                 target_name="NOT FOUND",
                 warnings=["Instrument not found"]
             )
 
         impact = DeletionImpact(
             target_type="instrument",
-            target_id=instrument_id,
             target_name=f"{instrument.ticker} ({instrument.name})"
         )
 
@@ -896,7 +973,7 @@ class FinancialTimeSeriesDB:
             ).fetchall()
 
             impact.fields_to_delete = [
-                {"id": f['id'], "name": f['field_name'], "frequency": f['frequency']}
+                {"name": f['field_name'], "frequency": f['frequency']}
                 for f in fields
             ]
 
@@ -915,7 +992,7 @@ class FinancialTimeSeriesDB:
                 ).fetchall()
 
                 impact.provider_configs_to_delete = [
-                    {"id": c['id'], "provider": c['provider']}
+                    {"provider": c['provider']}
                     for c in configs
                 ]
 
@@ -942,8 +1019,7 @@ class FinancialTimeSeriesDB:
             ).fetchall()
 
             impact.aliases_to_delete = [
-                {"id": a['id'], "ticker": a['ticker'],
-                 "field": a['field_name'], "frequency": a['frequency']}
+                {"ticker": a['ticker'], "field": a['field_name'], "frequency": a['frequency']}
                 for a in aliases
             ]
 
@@ -964,49 +1040,43 @@ class FinancialTimeSeriesDB:
         self,
         ticker: str,
         field_name: str,
-        frequency: Frequency,
+        frequency: Union[str, Frequency],
         unit: str = "",
         alias_ticker: Optional[str] = None,
-        alias_field_id: Optional[int] = None,
+        alias_field_name: Optional[str] = None,
+        alias_frequency: Optional[Union[str, Frequency]] = None,
         metadata: Optional[dict] = None
     ) -> InstrumentField:
         """
         Add a new field to an instrument.
 
-        The field's description is automatically retrieved from the storable fields
-        registry. Additional metadata from the storable field definition is merged
-        with any metadata provided here.
-
         Args:
             ticker: Ticker symbol of the parent instrument (e.g., "AAPL")
             field_name: Name of the field (must be in storable fields registry)
-            frequency: Data frequency
-            unit: Unit of measurement (overrides storable field metadata unit if provided)
+            frequency: Data frequency (string like "daily" or Frequency enum)
+            unit: Unit of measurement
             alias_ticker: If this is an alias, the ticker of the target instrument
-            alias_field_id: If this is an alias, the target field ID
-            metadata: Additional metadata (merged with storable field metadata)
+            alias_field_name: If this is an alias, the target field name
+            alias_frequency: If this is an alias, the target frequency (defaults to same)
+            metadata: Additional metadata
 
         Returns:
             The created InstrumentField object
 
         Raises:
-            ValueError: If ticker not found, if alias_ticker is set without alias_field_id
-                        or vice versa, or if field_name is not in the allowed storable fields list
-            sqlite3.IntegrityError: If field already exists for this instrument/frequency
+            ValueError: If ticker not found, alias params incomplete, or field_name not allowed
         """
-        # Look up instrument by ticker
-        instrument = self.get_instrument_by_ticker(ticker)
-        if not instrument:
-            raise ValueError(f"Instrument not found with ticker: {ticker}")
+        freq = _to_frequency(frequency)
+        instrument_id = self._get_instrument_id(ticker)
 
-        # Validate field name against storable fields registry
+        # Validate field name
         self.validate_field_name(field_name)
 
         # Get description and default metadata from storable field definition
         storable_field = self.get_storable_field(field_name)
         description = storable_field.description if storable_field else ""
 
-        # Merge metadata: storable field defaults + provided metadata
+        # Merge metadata
         merged_metadata = {}
         if storable_field and storable_field.metadata:
             merged_metadata.update(storable_field.metadata)
@@ -1017,18 +1087,18 @@ class FinancialTimeSeriesDB:
         if not unit and storable_field and storable_field.metadata:
             unit = storable_field.metadata.get("unit", "")
 
-        if (alias_ticker is None) != (alias_field_id is None):
-            raise ValueError(
-                "Both alias_ticker and alias_field_id must be set together, or neither"
-            )
-
-        # Look up alias instrument if provided
+        # Handle alias
         alias_instrument_id = None
-        if alias_ticker:
-            alias_instrument = self.get_instrument_by_ticker(alias_ticker)
-            if not alias_instrument:
-                raise ValueError(f"Alias instrument not found with ticker: {alias_ticker}")
-            alias_instrument_id = alias_instrument.id
+        alias_field_id = None
+
+        if alias_ticker or alias_field_name:
+            if not (alias_ticker and alias_field_name):
+                raise ValueError(
+                    "Both alias_ticker and alias_field_name must be set together"
+                )
+            alias_freq = _to_frequency(alias_frequency) if alias_frequency else freq
+            alias_instrument_id = self._get_instrument_id(alias_ticker)
+            alias_field_id = self._get_field_id(alias_ticker, alias_field_name, alias_freq)
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -1038,137 +1108,96 @@ class FinancialTimeSeriesDB:
                  alias_instrument_id, alias_field_id, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (instrument.id, field_name, frequency.value, description, unit,
+                (instrument_id, field_name, freq.value, description, unit,
                  alias_instrument_id, alias_field_id, json.dumps(merged_metadata))
             )
             conn.commit()
 
-            field = self.get_field(cursor.lastrowid)
-            logger.info(
-                f"Added field: {field_name} ({frequency.value}) "
-                f"for instrument: {ticker}"
-            )
+            field = self._get_field_by_id(cursor.lastrowid)
+            logger.info(f"Added field: {ticker}.{field_name} ({freq.value})")
             return field
 
     def add_alias_field(
         self,
         ticker: str,
         field_name: str,
-        frequency: Frequency,
+        frequency: Union[str, Frequency],
         target_ticker: str,
         target_field_name: str,
-        target_frequency: Optional[Frequency] = None
+        target_frequency: Optional[Union[str, Frequency]] = None
     ) -> InstrumentField:
         """
-        Convenience method to add an alias field that points to another instrument's field.
-
-        The field's description comes from the storable fields registry.
+        Add an alias field that points to another instrument's field.
 
         Args:
-            ticker: Ticker of the instrument to add the alias to (e.g., "AAPL")
-            field_name: Name for the alias field (must be in storable fields registry)
+            ticker: Ticker of the instrument to add the alias to
+            field_name: Name for the alias field
             frequency: Frequency of the alias
-            target_ticker: Ticker of the target instrument (e.g., "SPX")
+            target_ticker: Ticker of the target instrument
             target_field_name: Name of the target field
             target_frequency: Frequency of target field (defaults to same as alias)
 
         Returns:
             The created alias field
-
-        Raises:
-            ValueError: If target instrument or field not found, or field_name not in storable fields
         """
-        target_frequency = target_frequency or frequency
-
-        # Find the target instrument
-        target_instrument = self.get_instrument_by_ticker(target_ticker)
-        if not target_instrument:
-            raise ValueError(f"Target instrument not found with ticker: {target_ticker}")
-
-        # Find the target field
-        target_field = self.get_field_by_name(
-            target_instrument.id, target_field_name, target_frequency
-        )
-
-        if not target_field:
-            raise ValueError(
-                f"Target field not found: ticker={target_ticker}, "
-                f"field_name={target_field_name}, frequency={target_frequency.value}"
-            )
+        freq = _to_frequency(frequency)
+        target_freq = _to_frequency(target_frequency) if target_frequency else freq
 
         return self.add_field(
             ticker=ticker,
             field_name=field_name,
-            frequency=frequency,
+            frequency=freq,
             alias_ticker=target_ticker,
-            alias_field_id=target_field.id
+            alias_field_name=target_field_name,
+            alias_frequency=target_freq
         )
 
-    def get_field(self, field_id: int) -> Optional[InstrumentField]:
-        """Get a field by ID."""
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM instrument_fields WHERE id = ?",
-                (field_id,)
-            ).fetchone()
-
-            if row:
-                return self._row_to_field(row)
-            return None
-
-    def get_field_by_name(
-        self,
-        instrument_id: int,
-        field_name: str,
-        frequency: Frequency
-    ) -> Optional[InstrumentField]:
-        """Get a field by instrument ID, name, and frequency."""
-        with self._get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM instrument_fields
-                WHERE instrument_id = ? AND field_name = ? AND frequency = ?
-                """,
-                (instrument_id, field_name, frequency.value)
-            ).fetchone()
-
-            if row:
-                return self._row_to_field(row)
-            return None
-
-    def get_field_by_ticker(
+    def get_field(
         self,
         ticker: str,
         field_name: str,
-        frequency: Frequency
+        frequency: Union[str, Frequency]
     ) -> Optional[InstrumentField]:
         """
-        Get a field by instrument ticker, field name, and frequency.
+        Get a field by ticker, field_name, and frequency.
 
         Args:
-            ticker: Ticker symbol of the instrument (e.g., "AAPL")
+            ticker: Ticker symbol of the instrument
             field_name: Name of the field
             frequency: Data frequency
 
         Returns:
             InstrumentField if found, None otherwise
         """
-        instrument = self.get_instrument_by_ticker(ticker)
+        freq = _to_frequency(frequency)
+        instrument = self.get_instrument(ticker)
         if not instrument:
             return None
-        return self.get_field_by_name(instrument.id, field_name, frequency)
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM instrument_fields
+                WHERE instrument_id = ? AND field_name = ? AND frequency = ?
+                """,
+                (instrument.id, field_name, freq.value)
+            ).fetchone()
+
+            if row:
+                return self._row_to_field(row)
+            return None
 
     def list_fields(
         self,
-        instrument_id: Optional[int] = None,
-        frequency: Optional[Frequency] = None,
+        ticker: Optional[str] = None,
+        frequency: Optional[Union[str, Frequency]] = None,
         include_aliases: bool = True
     ) -> list[InstrumentField]:
         """
         List fields with optional filtering.
 
         Args:
-            instrument_id: Filter by instrument
+            ticker: Filter by instrument ticker
             frequency: Filter by frequency
             include_aliases: Whether to include alias fields
 
@@ -1178,13 +1207,17 @@ class FinancialTimeSeriesDB:
         query = "SELECT * FROM instrument_fields WHERE 1=1"
         params = []
 
-        if instrument_id is not None:
+        if ticker:
+            instrument = self.get_instrument(ticker)
+            if not instrument:
+                return []
             query += " AND instrument_id = ?"
-            params.append(instrument_id)
+            params.append(instrument.id)
 
         if frequency:
+            freq = _to_frequency(frequency)
             query += " AND frequency = ?"
-            params.append(frequency.value)
+            params.append(freq.value)
 
         if not include_aliases:
             query += " AND alias_field_id IS NULL"
@@ -1195,8 +1228,15 @@ class FinancialTimeSeriesDB:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_field(row) for row in rows]
 
-    def get_aliases_for_field(self, field_id: int) -> list[InstrumentField]:
+    def get_aliases_for_field(
+        self,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency]
+    ) -> list[InstrumentField]:
         """Get all alias fields that point to a specific field."""
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         with self._get_connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM instrument_fields WHERE alias_field_id = ?",
@@ -1204,7 +1244,12 @@ class FinancialTimeSeriesDB:
             ).fetchall()
             return [self._row_to_field(row) for row in rows]
 
-    def resolve_alias(self, field_id: int) -> InstrumentField:
+    def resolve_alias(
+        self,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency]
+    ) -> InstrumentField:
         """
         Resolve an alias to its target field.
 
@@ -1212,7 +1257,9 @@ class FinancialTimeSeriesDB:
         Handles chains of aliases by following them to the end.
 
         Args:
-            field_id: ID of the field (possibly an alias)
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
 
         Returns:
             The resolved target field
@@ -1220,18 +1267,19 @@ class FinancialTimeSeriesDB:
         Raises:
             ValueError: If field not found or circular alias detected
         """
+        field_id = self._get_field_id(ticker, field_name, frequency)
         visited = set()
         current_id = field_id
 
         while True:
             if current_id in visited:
-                raise ValueError(f"Circular alias detected at field ID: {current_id}")
+                raise ValueError(f"Circular alias detected")
 
             visited.add(current_id)
-            field = self.get_field(current_id)
+            field = self._get_field_by_id(current_id)
 
             if not field:
-                raise ValueError(f"Field not found: {current_id}")
+                raise ValueError(f"Field not found during alias resolution")
 
             if field.alias_field_id is None:
                 return field
@@ -1240,29 +1288,31 @@ class FinancialTimeSeriesDB:
 
     def update_field(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         **kwargs
     ) -> Optional[InstrumentField]:
         """
         Update a field's attributes.
 
         Args:
-            field_id: ID of the field to update
-            **kwargs: Attributes to update
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
+            **kwargs: Attributes to update (description, unit, metadata)
 
         Returns:
             Updated field or None if not found
         """
-        allowed_fields = {'field_name', 'frequency', 'description', 'unit',
-                          'alias_instrument_id', 'alias_field_id', 'metadata'}
+        field_id = self._get_field_id(ticker, field_name, frequency)
 
+        allowed_fields = {'description', 'unit', 'metadata'}
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
-        if not updates:
-            return self.get_field(field_id)
 
-        # Handle special conversions
-        if 'frequency' in updates and isinstance(updates['frequency'], Frequency):
-            updates['frequency'] = updates['frequency'].value
+        if not updates:
+            return self._get_field_by_id(field_id)
+
         if 'metadata' in updates and isinstance(updates['metadata'], dict):
             updates['metadata'] = json.dumps(updates['metadata'])
 
@@ -1276,35 +1326,44 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-        logger.info(f"Updated field ID: {field_id}")
-        return self.get_field(field_id)
+        logger.info(f"Updated field: {ticker}.{field_name}")
+        return self._get_field_by_id(field_id)
 
     def delete_field(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         dry_run: bool = False,
         print_output: bool = True
     ) -> DeletionImpact:
         """
         Delete a field and all related data.
 
-        This will:
-        - Delete all provider configs for this field
-        - Delete all time series data for this field
-        - Warn about aliases pointing to this field
-
         Args:
-            field_id: ID of the field to delete
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
             dry_run: If True, only simulate and return impact
-            print_output: If True and dry_run is True, print impact report to stdout
+            print_output: If True and dry_run is True, print impact report
 
         Returns:
             DeletionImpact describing what was/would be deleted
         """
-        impact = self._calculate_field_deletion_impact(field_id)
+        freq = _to_frequency(frequency)
+        field = self.get_field(ticker, field_name, freq)
+
+        if not field:
+            return DeletionImpact(
+                target_type="field",
+                target_name=f"{ticker}.{field_name} ({freq.value})",
+                warnings=["Field not found"]
+            )
+
+        impact = self._calculate_field_deletion_impact(field.id)
 
         if dry_run:
-            logger.info(f"DRY RUN - Would delete field ID: {field_id}")
+            logger.info(f"DRY RUN - Would delete field: {ticker}.{field_name}")
             if print_output:
                 print_deletion_impact(impact)
             return impact
@@ -1316,7 +1375,7 @@ class FinancialTimeSeriesDB:
             # Handle aliases pointing to this field
             aliases = conn.execute(
                 "SELECT id FROM instrument_fields WHERE alias_field_id = ?",
-                (field_id,)
+                (field.id,)
             ).fetchall()
 
             for alias in aliases:
@@ -1325,29 +1384,27 @@ class FinancialTimeSeriesDB:
                     (alias['id'],)
                 )
 
-            # Delete the field (CASCADE handles provider_configs and time_series_data)
-            conn.execute("DELETE FROM instrument_fields WHERE id = ?", (field_id,))
+            # Delete the field
+            conn.execute("DELETE FROM instrument_fields WHERE id = ?", (field.id,))
             conn.commit()
 
-        logger.info(f"Deleted field ID: {field_id}")
+        logger.info(f"Deleted field: {ticker}.{field_name}")
         return impact
 
     def _calculate_field_deletion_impact(self, field_id: int) -> DeletionImpact:
         """Calculate the impact of deleting a field."""
-        field = self.get_field(field_id)
+        field = self._get_field_by_id(field_id)
         if not field:
             return DeletionImpact(
                 target_type="field",
-                target_id=field_id,
                 target_name="NOT FOUND",
                 warnings=["Field not found"]
             )
 
-        instrument = self.get_instrument(field.instrument_id)
+        instrument = self._get_instrument_by_id(field.instrument_id)
 
         impact = DeletionImpact(
             target_type="field",
-            target_id=field_id,
             target_name=f"{instrument.ticker}.{field.field_name} ({field.frequency.value})"
         )
 
@@ -1359,7 +1416,7 @@ class FinancialTimeSeriesDB:
             ).fetchall()
 
             impact.provider_configs_to_delete = [
-                {"id": c['id'], "provider": c['provider']}
+                {"provider": c['provider']}
                 for c in configs
             ]
 
@@ -1383,8 +1440,7 @@ class FinancialTimeSeriesDB:
             ).fetchall()
 
             impact.aliases_to_delete = [
-                {"id": a['id'], "ticker": a['ticker'],
-                 "field": a['field_name'], "frequency": a['frequency']}
+                {"ticker": a['ticker'], "field": a['field_name'], "frequency": a['frequency']}
                 for a in aliases
             ]
 
@@ -1402,7 +1458,9 @@ class FinancialTimeSeriesDB:
 
     def add_provider_config(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         provider: DataProvider,
         config: dict,
         is_active: bool = True,
@@ -1412,22 +1470,19 @@ class FinancialTimeSeriesDB:
         Add a data provider configuration for a field.
 
         Args:
-            field_id: ID of the field
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
             provider: Data provider type
-            config: Provider-specific configuration (e.g., Bloomberg settings)
+            config: Provider-specific configuration
             is_active: Whether this config is active
             priority: Priority for fetching (lower = higher priority)
 
         Returns:
             The created ProviderConfig
-
-        Example config for Bloomberg:
-            {
-                "ticker": "AAPL US Equity",
-                "field": "PX_LAST",
-                "override": {"BEST_FPERIOD_OVERRIDE": "1BF"}
-            }
         """
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         with self._get_connection() as conn:
             cursor = conn.execute(
                 """
@@ -1438,14 +1493,12 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-            provider_config = self.get_provider_config(cursor.lastrowid)
-            logger.info(
-                f"Added provider config: {provider.value} for field ID: {field_id}"
-            )
+            provider_config = self._get_provider_config_by_id(cursor.lastrowid)
+            logger.info(f"Added provider config: {provider.value} for {ticker}.{field_name}")
             return provider_config
 
-    def get_provider_config(self, config_id: int) -> Optional[ProviderConfig]:
-        """Get a provider config by ID."""
+    def _get_provider_config_by_id(self, config_id: int) -> Optional[ProviderConfig]:
+        """Get a provider config by its internal ID."""
         with self._get_connection() as conn:
             row = conn.execute(
                 "SELECT * FROM provider_configs WHERE id = ?",
@@ -1456,12 +1509,16 @@ class FinancialTimeSeriesDB:
                 return self._row_to_provider_config(row)
             return None
 
-    def get_provider_configs_for_field(
+    def get_provider_configs(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         active_only: bool = True
     ) -> list[ProviderConfig]:
         """Get all provider configs for a field, ordered by priority."""
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         query = "SELECT * FROM provider_configs WHERE field_id = ?"
         params = [field_id]
 
@@ -1476,18 +1533,32 @@ class FinancialTimeSeriesDB:
 
     def update_provider_config(
         self,
-        config_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
+        provider: DataProvider,
         **kwargs
     ) -> Optional[ProviderConfig]:
         """Update a provider config."""
-        allowed_fields = {'provider', 'config', 'is_active', 'priority'}
+        field_id = self._get_field_id(ticker, field_name, frequency)
 
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM provider_configs WHERE field_id = ? AND provider = ?",
+                (field_id, provider.value)
+            ).fetchone()
+
+            if not row:
+                return None
+
+            config_id = row['id']
+
+        allowed_fields = {'config', 'is_active', 'priority'}
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
-        if not updates:
-            return self.get_provider_config(config_id)
 
-        if 'provider' in updates and isinstance(updates['provider'], DataProvider):
-            updates['provider'] = updates['provider'].value
+        if not updates:
+            return self._get_provider_config_by_id(config_id)
+
         if 'config' in updates and isinstance(updates['config'], dict):
             updates['config'] = json.dumps(updates['config'])
         if 'is_active' in updates:
@@ -1503,20 +1574,28 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-        logger.info(f"Updated provider config ID: {config_id}")
-        return self.get_provider_config(config_id)
+        logger.info(f"Updated provider config: {provider.value} for {ticker}.{field_name}")
+        return self._get_provider_config_by_id(config_id)
 
-    def delete_provider_config(self, config_id: int) -> bool:
+    def delete_provider_config(
+        self,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
+        provider: DataProvider
+    ) -> bool:
         """Delete a provider config."""
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         with self._get_connection() as conn:
             cursor = conn.execute(
-                "DELETE FROM provider_configs WHERE id = ?",
-                (config_id,)
+                "DELETE FROM provider_configs WHERE field_id = ? AND provider = ?",
+                (field_id, provider.value)
             )
             conn.commit()
 
             if cursor.rowcount > 0:
-                logger.info(f"Deleted provider config ID: {config_id}")
+                logger.info(f"Deleted provider config: {provider.value} for {ticker}.{field_name}")
                 return True
             return False
 
@@ -1526,7 +1605,9 @@ class FinancialTimeSeriesDB:
 
     def add_time_series_point(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         timestamp: datetime | date,
         value: float,
         metadata: Optional[dict] = None
@@ -1535,14 +1616,18 @@ class FinancialTimeSeriesDB:
         Add a single time series data point.
 
         Args:
-            field_id: ID of the field
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
             timestamp: Timestamp of the data point
             value: The value
-            metadata: Optional additional data (e.g., volume, open, high, low)
+            metadata: Optional additional data
 
         Returns:
             The created TimeSeriesPoint
         """
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         if isinstance(timestamp, date) and not isinstance(timestamp, datetime):
             timestamp = datetime.combine(timestamp, datetime.min.time())
 
@@ -1568,19 +1653,25 @@ class FinancialTimeSeriesDB:
 
     def add_time_series_bulk(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         data: list[tuple[datetime | date, float, Optional[dict]]]
     ) -> int:
         """
         Add multiple time series data points efficiently.
 
         Args:
-            field_id: ID of the field
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
             data: List of (timestamp, value, metadata) tuples
 
         Returns:
             Number of points inserted
         """
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         processed_data = []
         for item in data:
             ts = item[0]
@@ -1600,12 +1691,14 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-        logger.info(f"Bulk inserted {len(processed_data)} points for field ID: {field_id}")
+        logger.info(f"Bulk inserted {len(processed_data)} points for {ticker}.{field_name}")
         return len(processed_data)
 
     def get_time_series(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         start_date: Optional[datetime | date] = None,
         end_date: Optional[datetime | date] = None,
         resolve_alias: bool = True
@@ -1614,7 +1707,9 @@ class FinancialTimeSeriesDB:
         Get time series data for a field.
 
         Args:
-            field_id: ID of the field
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
             resolve_alias: If True and field is an alias, get data from target field
@@ -1622,10 +1717,13 @@ class FinancialTimeSeriesDB:
         Returns:
             List of TimeSeriesPoint objects
         """
+        freq = _to_frequency(frequency)
+        field_id = self._get_field_id(ticker, field_name, freq)
+
         # Resolve alias if needed
         actual_field_id = field_id
         if resolve_alias:
-            resolved_field = self.resolve_alias(field_id)
+            resolved_field = self.resolve_alias(ticker, field_name, freq)
             actual_field_id = resolved_field.id
 
         query = "SELECT * FROM time_series_data WHERE field_id = ?"
@@ -1651,13 +1749,18 @@ class FinancialTimeSeriesDB:
 
     def get_latest_value(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         resolve_alias: bool = True
     ) -> Optional[TimeSeriesPoint]:
         """Get the most recent time series value for a field."""
+        freq = _to_frequency(frequency)
+        field_id = self._get_field_id(ticker, field_name, freq)
+
         actual_field_id = field_id
         if resolve_alias:
-            resolved_field = self.resolve_alias(field_id)
+            resolved_field = self.resolve_alias(ticker, field_name, freq)
             actual_field_id = resolved_field.id
 
         with self._get_connection() as conn:
@@ -1677,7 +1780,9 @@ class FinancialTimeSeriesDB:
 
     def delete_time_series(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency],
         start_date: Optional[datetime | date] = None,
         end_date: Optional[datetime | date] = None
     ) -> int:
@@ -1685,13 +1790,17 @@ class FinancialTimeSeriesDB:
         Delete time series data for a field within a date range.
 
         Args:
-            field_id: ID of the field
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
             start_date: Start of date range (if None, no lower bound)
             end_date: End of date range (if None, no upper bound)
 
         Returns:
             Number of points deleted
         """
+        field_id = self._get_field_id(ticker, field_name, frequency)
+
         query = "DELETE FROM time_series_data WHERE field_id = ?"
         params: list[Any] = [field_id]
 
@@ -1711,46 +1820,30 @@ class FinancialTimeSeriesDB:
             cursor = conn.execute(query, params)
             conn.commit()
 
-            logger.info(f"Deleted {cursor.rowcount} time series points for field ID: {field_id}")
+            logger.info(f"Deleted {cursor.rowcount} time series points for {ticker}.{field_name}")
             return cursor.rowcount
 
     # =========================================================================
     # Utility Methods
     # =========================================================================
 
-    def preview_deletion(
+    def get_full_field_info(
         self,
-        target_type: str,
-        target_id: int
-    ) -> DeletionImpact:
-        """
-        Preview what would be deleted without actually deleting.
-
-        Args:
-            target_type: "instrument" or "field"
-            target_id: ID of the target
-
-        Returns:
-            DeletionImpact with full details
-        """
-        if target_type == "instrument":
-            return self._calculate_instrument_deletion_impact(target_id)
-        elif target_type == "field":
-            return self._calculate_field_deletion_impact(target_id)
-        else:
-            raise ValueError(f"Unknown target type: {target_type}")
-
-    def get_full_field_info(self, field_id: int) -> Optional[dict]:
+        ticker: str,
+        field_name: str,
+        frequency: Union[str, Frequency]
+    ) -> Optional[dict]:
         """
         Get comprehensive information about a field including its instrument,
         provider configs, and time series summary.
         """
-        field = self.get_field(field_id)
+        freq = _to_frequency(frequency)
+        field = self.get_field(ticker, field_name, freq)
         if not field:
             return None
 
-        instrument = self.get_instrument(field.instrument_id)
-        provider_configs = self.get_provider_configs_for_field(field_id, active_only=False)
+        instrument = self.get_instrument(ticker)
+        provider_configs = self.get_provider_configs(ticker, field_name, freq, active_only=False)
 
         with self._get_connection() as conn:
             stats = conn.execute(
@@ -1765,17 +1858,17 @@ class FinancialTimeSeriesDB:
                 FROM time_series_data
                 WHERE field_id = ?
                 """,
-                (field_id,)
+                (field.id,)
             ).fetchone()
 
         # Get alias info if applicable
         alias_info = None
         if field.alias_field_id:
-            target_field = self.get_field(field.alias_field_id)
+            target_field = self._get_field_by_id(field.alias_field_id)
             if target_field:
-                target_instrument = self.get_instrument(target_field.instrument_id)
+                target_instrument = self._get_instrument_by_id(target_field.instrument_id)
                 alias_info = {
-                    "target_instrument": target_instrument.ticker if target_instrument else None,
+                    "target_ticker": target_instrument.ticker if target_instrument else None,
                     "target_field": target_field.field_name,
                     "target_frequency": target_field.frequency.value
                 }
@@ -1802,7 +1895,6 @@ class FinancialTimeSeriesDB:
             fields = conn.execute("SELECT * FROM instrument_fields").fetchall()
             configs = conn.execute("SELECT * FROM provider_configs").fetchall()
 
-            # Don't export time series data by default (can be large)
             ts_count = conn.execute(
                 "SELECT COUNT(*) as cnt FROM time_series_data"
             ).fetchone()['cnt']
@@ -1900,10 +1992,7 @@ def create_database(
 
     Args:
         db_path: Path to the database file or ":memory:" for in-memory database
-        storable_fields: Optional dict of allowed field definitions. If None and database
-                        has no existing storable fields, uses DEFAULT_STORABLE_FIELDS.
-                        Pass an empty dict to disable field name validation.
-                        Storable fields are persisted in the database.
+        storable_fields: Optional dict of allowed field definitions.
 
     Returns:
         FinancialTimeSeriesDB instance
@@ -1916,7 +2005,7 @@ def print_deletion_impact(impact: DeletionImpact) -> None:
     print("\n" + "=" * 60)
     print(f"DELETION IMPACT REPORT: {impact.target_type.upper()}")
     print("=" * 60)
-    print(f"Target: {impact.target_name} (ID: {impact.target_id})")
+    print(f"Target: {impact.target_name}")
     print("-" * 60)
 
     if impact.fields_to_delete:
@@ -1932,13 +2021,13 @@ def print_deletion_impact(impact: DeletionImpact) -> None:
     if impact.provider_configs_to_delete:
         print(f"\nProvider configs to be deleted ({len(impact.provider_configs_to_delete)}):")
         for c in impact.provider_configs_to_delete:
-            print(f"  - {c['provider']} (ID: {c['id']})")
+            print(f"  - {c['provider']}")
 
     if impact.time_series_points_to_delete > 0:
         print(f"\nTime series points to be deleted: {impact.time_series_points_to_delete:,}")
 
     if impact.warnings:
-        print("\n⚠️  WARNINGS:")
+        print("\nWARNINGS:")
         for warning in impact.warnings:
             print(f"  {warning}")
 

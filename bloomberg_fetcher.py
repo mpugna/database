@@ -96,20 +96,25 @@ class BloombergFetcher:
     - Reference data requests (ReferenceDataRequest)
     - Automatic storage of fetched data into the database
 
+    All methods use string identifiers (ticker, field_name, frequency) instead of
+    numeric IDs for a cleaner API.
+
     Example:
         db = FinancialTimeSeriesDB("my_db.sqlite")
         fetcher = BloombergFetcher(db)
 
         # Fetch historical prices for a field
         fetcher.fetch_historical_data(
-            field_id=price_field.id,
+            ticker="AAPL",
+            field_name="price",
+            frequency="daily",
             start_date=date(2024, 1, 1),
             end_date=date(2024, 12, 31)
         )
 
         # Or fetch for all Bloomberg-configured fields of an instrument
         fetcher.fetch_all_instrument_data(
-            instrument_id=apple.id,
+            ticker="AAPL",
             start_date=date(2024, 1, 1)
         )
     """
@@ -201,8 +206,10 @@ class BloombergFetcher:
 
     def fetch_historical_data(
         self,
-        field_id: int,
-        start_date: date,
+        ticker: str,
+        field_name: str,
+        frequency: str = "daily",
+        start_date: Optional[date] = None,
         end_date: Optional[date] = None,
         store: bool = True
     ) -> list[BloombergDataPoint]:
@@ -213,8 +220,10 @@ class BloombergFetcher:
         the Bloomberg security and field to request.
 
         Args:
-            field_id: ID of the InstrumentField to fetch data for
-            start_date: Start date for historical data
+            ticker: Instrument ticker (e.g., "AAPL", "SPX")
+            field_name: Name of the field (e.g., "price")
+            frequency: Data frequency (e.g., "daily", "weekly")
+            start_date: Start date for historical data (required if no data in DB)
             end_date: End date (defaults to today)
             store: If True, automatically store fetched data in the database
 
@@ -230,7 +239,7 @@ class BloombergFetcher:
         end_date = end_date or date.today()
 
         # Get the Bloomberg provider config for this field
-        configs = self.db.get_provider_configs_for_field(field_id, active_only=True)
+        configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
         bloomberg_config = None
 
         for config in configs:
@@ -239,7 +248,9 @@ class BloombergFetcher:
                 break
 
         if not bloomberg_config:
-            raise ValueError(f"No active Bloomberg config found for field ID {field_id}")
+            raise ValueError(
+                f"No active Bloomberg config found for {ticker}.{field_name} ({frequency})"
+            )
 
         # Extract Bloomberg-specific settings from config
         bb_ticker = bloomberg_config.config.get("ticker")
@@ -249,8 +260,11 @@ class BloombergFetcher:
 
         if not bb_ticker:
             raise ValueError(
-                f"Bloomberg config for field {field_id} missing 'ticker' in config"
+                f"Bloomberg config for {ticker}.{field_name} missing 'ticker' in config"
             )
+
+        if not start_date:
+            raise ValueError("start_date is required for fetch_historical_data")
 
         # Make the Bloomberg request
         data_points = self._request_historical_data(
@@ -264,13 +278,15 @@ class BloombergFetcher:
 
         # Store in database if requested
         if store and data_points:
-            self._store_data_points(field_id, data_points)
+            self._store_data_points(ticker, field_name, frequency, data_points)
 
         return data_points
 
     def fetch_reference_data(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: str = "daily",
         store: bool = True
     ) -> Optional[BloombergDataPoint]:
         """
@@ -279,7 +295,9 @@ class BloombergFetcher:
         This fetches the latest value (not historical) for a field.
 
         Args:
-            field_id: ID of the InstrumentField to fetch data for
+            ticker: Instrument ticker (e.g., "AAPL", "SPX")
+            field_name: Name of the field (e.g., "price")
+            frequency: Data frequency (e.g., "daily", "weekly")
             store: If True, automatically store fetched data in the database
 
         Returns:
@@ -288,7 +306,7 @@ class BloombergFetcher:
         self._ensure_connected()
 
         # Get the Bloomberg provider config for this field
-        configs = self.db.get_provider_configs_for_field(field_id, active_only=True)
+        configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
         bloomberg_config = None
 
         for config in configs:
@@ -297,7 +315,9 @@ class BloombergFetcher:
                 break
 
         if not bloomberg_config:
-            raise ValueError(f"No active Bloomberg config found for field ID {field_id}")
+            raise ValueError(
+                f"No active Bloomberg config found for {ticker}.{field_name} ({frequency})"
+            )
 
         bb_ticker = bloomberg_config.config.get("ticker")
         bb_field = bloomberg_config.config.get("field", "PX_LAST")
@@ -305,7 +325,7 @@ class BloombergFetcher:
 
         if not bb_ticker:
             raise ValueError(
-                f"Bloomberg config for field {field_id} missing 'ticker' in config"
+                f"Bloomberg config for {ticker}.{field_name} missing 'ticker' in config"
             )
 
         # Make the reference data request
@@ -316,7 +336,7 @@ class BloombergFetcher:
         )
 
         if store and data_point:
-            self._store_data_points(field_id, [data_point])
+            self._store_data_points(ticker, field_name, frequency, [data_point])
 
         return data_point
 
@@ -327,10 +347,10 @@ class BloombergFetcher:
         frequency: str = "daily",
     ) -> Optional[dict]:
         """
-        Retrieve field ID and Bloomberg config for an existing field.
+        Retrieve field info and Bloomberg config for an existing field.
 
         This method looks up an existing field by (ticker, field_name, frequency)
-        and returns its ID, Bloomberg configuration, and the latest date available in the DB.
+        and returns its Bloomberg configuration and the latest date available in the DB.
 
         Args:
             ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
@@ -340,7 +360,9 @@ class BloombergFetcher:
         Returns:
             Dictionary with field info, or None if field/instrument not found:
             {
-                "field_id": int,
+                "ticker": str,
+                "field_name": str,
+                "frequency": str,
                 "field": InstrumentField,
                 "instrument": Instrument,
                 "bloomberg_config": ProviderConfig or None,
@@ -355,7 +377,6 @@ class BloombergFetcher:
                 frequency="daily"
             )
             if info:
-                print(f"Field ID: {info['field_id']}")
                 print(f"Latest date in DB: {info['latest_date']}")
                 print(f"Bloomberg ticker: {info['bloomberg_config'].config['ticker']}")
         """
@@ -371,17 +392,17 @@ class BloombergFetcher:
             )
 
         # Look up instrument by ticker
-        instrument = self.db.get_instrument_by_ticker(ticker)
+        instrument = self.db.get_instrument(ticker)
         if not instrument:
             return None
 
         # Get the field
-        field = self.db.get_field_by_name(instrument.id, field_name, freq_enum)
+        field = self.db.get_field(ticker, field_name, freq_enum)
         if not field:
             return None
 
         # Get Bloomberg config
-        configs = self.db.get_provider_configs_for_field(field.id, active_only=True)
+        configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
         bloomberg_config = None
         for config in configs:
             if config.provider == DataProvider.BLOOMBERG:
@@ -389,7 +410,7 @@ class BloombergFetcher:
                 break
 
         # Get latest date in DB
-        latest_point = self.db.get_latest_value(field.id, resolve_alias=False)
+        latest_point = self.db.get_latest_value(ticker, field_name, frequency, resolve_alias=False)
         latest_date = None
         if latest_point:
             if isinstance(latest_point.timestamp, datetime):
@@ -398,7 +419,9 @@ class BloombergFetcher:
                 latest_date = latest_point.timestamp
 
         return {
-            "field_id": field.id,
+            "ticker": ticker,
+            "field_name": field_name,
+            "frequency": frequency,
             "field": field,
             "instrument": instrument,
             "bloomberg_config": bloomberg_config,
@@ -462,7 +485,7 @@ class BloombergFetcher:
 
         if not info["bloomberg_config"]:
             raise ValueError(
-                f"No active Bloomberg config found for field ID {info['field_id']}"
+                f"No active Bloomberg config found for {ticker}.{field_name} ({frequency})"
             )
 
         # Determine start date
@@ -473,7 +496,7 @@ class BloombergFetcher:
             start_date = default_start_date
         else:
             raise ValueError(
-                f"No data exists in DB for field ID {info['field_id']} and no "
+                f"No data exists in DB for {ticker}.{field_name} ({frequency}) and no "
                 f"default_start_date was provided"
             )
 
@@ -482,7 +505,7 @@ class BloombergFetcher:
         # Check if we actually need to fetch
         if start_date > end_date:
             logger.info(
-                f"No new data to fetch for field {field_name}: "
+                f"No new data to fetch for {ticker}.{field_name}: "
                 f"DB is up to date through {info['latest_date']}"
             )
             return [], {
@@ -494,7 +517,9 @@ class BloombergFetcher:
 
         # Fetch the data
         data_points = self.fetch_historical_data(
-            field_id=info["field_id"],
+            ticker=ticker,
+            field_name=field_name,
+            frequency=frequency,
             start_date=start_date,
             end_date=end_date,
             store=store
@@ -509,49 +534,56 @@ class BloombergFetcher:
 
     def fetch_all_instrument_data(
         self,
-        instrument_id: int,
+        ticker: str,
         start_date: date,
         end_date: Optional[date] = None,
         store: bool = True
-    ) -> dict[int, list[BloombergDataPoint]]:
+    ) -> dict[str, list[BloombergDataPoint]]:
         """
         Fetch data for all Bloomberg-configured fields of an instrument.
 
         Args:
-            instrument_id: ID of the instrument
+            ticker: Ticker of the instrument (e.g., "AAPL", "SPX")
             start_date: Start date for historical data
             end_date: End date (defaults to today)
             store: If True, automatically store fetched data
 
         Returns:
-            Dict mapping field_id to list of BloombergDataPoint
+            Dict mapping field key (field_name:frequency) to list of BloombergDataPoint
         """
         results = {}
 
         # Get all fields for this instrument
-        fields = self.db.list_fields(instrument_id=instrument_id, include_aliases=False)
+        fields = self.db.list_fields(ticker=ticker, include_aliases=False)
 
         for field in fields:
+            freq_str = field.frequency.value
+
             # Check if this field has a Bloomberg config
-            configs = self.db.get_provider_configs_for_field(field.id, active_only=True)
+            configs = self.db.get_provider_configs(
+                ticker, field.field_name, freq_str, active_only=True
+            )
 
             has_bloomberg = any(c.provider == DataProvider.BLOOMBERG for c in configs)
 
             if has_bloomberg:
+                field_key = f"{field.field_name}:{freq_str}"
                 try:
                     data_points = self.fetch_historical_data(
-                        field_id=field.id,
+                        ticker=ticker,
+                        field_name=field.field_name,
+                        frequency=freq_str,
                         start_date=start_date,
                         end_date=end_date,
                         store=store
                     )
-                    results[field.id] = data_points
+                    results[field_key] = data_points
                     logger.info(
-                        f"Fetched {len(data_points)} points for field {field.field_name}"
+                        f"Fetched {len(data_points)} points for {ticker}.{field.field_name}"
                     )
                 except Exception as e:
-                    logger.error(f"Error fetching field {field.id}: {e}")
-                    results[field.id] = []
+                    logger.error(f"Error fetching {ticker}.{field.field_name}: {e}")
+                    results[field_key] = []
 
         return results
 
@@ -690,7 +722,9 @@ class BloombergFetcher:
 
     def _store_data_points(
         self,
-        field_id: int,
+        ticker: str,
+        field_name: str,
+        frequency: str,
         data_points: list[BloombergDataPoint]
     ) -> int:
         """Store fetched data points in the database."""
@@ -707,8 +741,8 @@ class BloombergFetcher:
             for dp in data_points
         ]
 
-        count = self.db.add_time_series_bulk(field_id, bulk_data)
-        logger.info(f"Stored {count} data points for field ID {field_id}")
+        count = self.db.add_time_series_bulk(ticker, field_name, frequency, bulk_data)
+        logger.info(f"Stored {count} data points for {ticker}.{field_name}")
         return count
 
     # =========================================================================
@@ -867,16 +901,16 @@ def get_or_setup_bloomberg_field(
         )
 
     # Look up instrument by ticker
-    instrument = db.get_instrument_by_ticker(ticker)
+    instrument = db.get_instrument(ticker)
     if not instrument:
         raise ValueError(f"Instrument not found with ticker: {ticker}")
 
     # Check if field already exists
-    existing_field = db.get_field_by_name(instrument.id, field_name, freq_enum)
+    existing_field = db.get_field(ticker, field_name, freq_enum)
 
     if existing_field:
         # Field exists, get its Bloomberg config
-        configs = db.get_provider_configs_for_field(existing_field.id, active_only=True)
+        configs = db.get_provider_configs(ticker, field_name, frequency, active_only=True)
         bloomberg_config = None
         for config in configs:
             if config.provider == DataProvider.BLOOMBERG:
@@ -896,7 +930,9 @@ def get_or_setup_bloomberg_field(
                 "overrides": overrides or {},
             }
             bloomberg_config = db.add_provider_config(
-                field_id=existing_field.id,
+                ticker=ticker,
+                field_name=field_name,
+                frequency=frequency,
                 provider=DataProvider.BLOOMBERG,
                 config=config_dict,
                 priority=priority
@@ -991,7 +1027,9 @@ def setup_bloomberg_field(
     }
 
     provider_config = db.add_provider_config(
-        field_id=field.id,
+        ticker=ticker,
+        field_name=field_name,
+        frequency=frequency,
         provider=DataProvider.BLOOMBERG,
         config=config_dict,
         priority=priority
