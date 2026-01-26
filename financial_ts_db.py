@@ -238,6 +238,16 @@ CREATE TABLE IF NOT EXISTS time_series_data (
     UNIQUE(field_id, timestamp)
 );
 
+-- Storable fields table (for field name registry with descriptions and metadata)
+CREATE TABLE IF NOT EXISTS storable_fields (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    metadata TEXT DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_instruments_ticker ON instruments(ticker);
 CREATE INDEX IF NOT EXISTS idx_instruments_type ON instruments(instrument_type);
@@ -247,6 +257,7 @@ CREATE INDEX IF NOT EXISTS idx_provider_field ON provider_configs(field_id);
 CREATE INDEX IF NOT EXISTS idx_timeseries_field ON time_series_data(field_id);
 CREATE INDEX IF NOT EXISTS idx_timeseries_timestamp ON time_series_data(timestamp);
 CREATE INDEX IF NOT EXISTS idx_timeseries_field_timestamp ON time_series_data(field_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_storable_fields_name ON storable_fields(name);
 
 -- Trigger to update timestamps
 CREATE TRIGGER IF NOT EXISTS update_instrument_timestamp
@@ -266,6 +277,12 @@ AFTER UPDATE ON provider_configs
 BEGIN
     UPDATE provider_configs SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;
+
+CREATE TRIGGER IF NOT EXISTS update_storable_field_timestamp
+AFTER UPDATE ON storable_fields
+BEGIN
+    UPDATE storable_fields SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+END;
 """
 
 
@@ -284,9 +301,13 @@ class FinancialTimeSeriesDB:
     - Configure data provider settings
     - Store and retrieve time series data
     - Preview deletion impacts before executing
+    - Manage storable field definitions (persisted to database)
 
     Example:
         db = FinancialTimeSeriesDB("my_database.db")
+
+        # Add a storable field definition (persisted to database)
+        db.add_storable_field("price", "Last traded price", {"unit": "currency"})
 
         # Add an instrument
         apple = db.add_instrument(
@@ -295,10 +316,10 @@ class FinancialTimeSeriesDB:
             instrument_type=InstrumentType.STOCK
         )
 
-        # Add a field
+        # Add a field using ticker
         price_field = db.add_field(
-            instrument_id=apple.id,
-            field_name="PRICE",
+            ticker="AAPL",
+            field_name="price",
             frequency=Frequency.DAILY
         )
 
@@ -320,28 +341,31 @@ class FinancialTimeSeriesDB:
 
         Args:
             db_path: Path to the SQLite database file. Use ":memory:" for in-memory database.
-            storable_fields: Optional dict of allowed field definitions. If None, uses DEFAULT_STORABLE_FIELDS.
+            storable_fields: Optional dict of allowed field definitions to initialize the database with.
+                            If None and database has no storable fields, uses DEFAULT_STORABLE_FIELDS.
                             Pass an empty dict to disable field name validation.
+                            Storable fields are persisted in the database.
         """
         self.db_path = Path(db_path) if db_path != ":memory:" else db_path
         self._is_memory = db_path == ":memory:"
         self._persistent_conn: Optional[sqlite3.Connection] = None
 
-        # Initialize storable fields registry (case-insensitive storage)
-        if storable_fields is not None:
-            self._storable_fields: dict[str, StorableFieldDef] = {
-                k.lower(): v for k, v in storable_fields.items()
-            }
-        else:
-            self._storable_fields = {
-                k.lower(): v for k, v in DEFAULT_STORABLE_FIELDS.items()
-            }
-
         # For in-memory databases, we need a persistent connection
         if self._is_memory:
             self._persistent_conn = self._create_connection()
 
+        # Initialize schema first
         self._initialize_db()
+
+        # Load storable fields from database, or initialize if empty
+        self._storable_fields: dict[str, StorableFieldDef] = {}
+        self._load_storable_fields_from_db()
+
+        # If database has no storable fields, populate with provided or defaults
+        if not self._storable_fields:
+            initial_fields = storable_fields if storable_fields is not None else DEFAULT_STORABLE_FIELDS
+            for name, field_def in initial_fields.items():
+                self._persist_storable_field(field_def)
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new database connection with proper settings."""
@@ -359,6 +383,38 @@ class FinancialTimeSeriesDB:
             conn.executescript(SCHEMA_SQL)
             conn.commit()
         logger.info(f"Database initialized: {self.db_path}")
+
+    def _load_storable_fields_from_db(self) -> None:
+        """Load storable fields from the database into memory."""
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT name, description, metadata FROM storable_fields").fetchall()
+            for row in rows:
+                name = row['name'].lower()
+                metadata = json.loads(row['metadata']) if row['metadata'] else {}
+                self._storable_fields[name] = StorableFieldDef(
+                    name=name,
+                    description=row['description'] or "",
+                    metadata=metadata
+                )
+
+    def _persist_storable_field(self, field_def: StorableFieldDef) -> None:
+        """Persist a storable field to the database."""
+        normalized_name = field_def.name.lower()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO storable_fields (name, description, metadata)
+                VALUES (?, ?, ?)
+                """,
+                (normalized_name, field_def.description, json.dumps(field_def.metadata))
+            )
+            conn.commit()
+        # Also update in-memory cache
+        self._storable_fields[normalized_name] = StorableFieldDef(
+            name=normalized_name,
+            description=field_def.description,
+            metadata=field_def.metadata
+        )
 
     @contextmanager
     def _get_connection(self):
@@ -408,6 +464,8 @@ class FinancialTimeSeriesDB:
         """
         Add a new field definition to the list of allowed storable fields.
 
+        The field definition is persisted in the database.
+
         Args:
             field_name: The field name to allow (case-insensitive)
             description: Description of the field
@@ -418,11 +476,12 @@ class FinancialTimeSeriesDB:
             db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
         """
         normalized = field_name.lower()
-        self._storable_fields[normalized] = StorableFieldDef(
+        field_def = StorableFieldDef(
             name=normalized,
             description=description,
             metadata=metadata or {}
         )
+        self._persist_storable_field(field_def)
         logger.info(f"Added storable field: {normalized}")
 
     def remove_storable_field(self, field_name: str) -> bool:
@@ -440,6 +499,14 @@ class FinancialTimeSeriesDB:
         """
         normalized = field_name.lower()
         if normalized in self._storable_fields:
+            # Remove from database
+            with self._get_connection() as conn:
+                conn.execute(
+                    "DELETE FROM storable_fields WHERE name = ?",
+                    (normalized,)
+                )
+                conn.commit()
+            # Remove from in-memory cache
             del self._storable_fields[normalized]
             logger.info(f"Removed storable field: {normalized}")
             return True
@@ -461,6 +528,8 @@ class FinancialTimeSeriesDB:
         """
         Replace the entire dict of allowed storable fields.
 
+        This clears all existing storable fields from the database and replaces them.
+
         Args:
             field_defs: New dict of field definitions
 
@@ -470,7 +539,22 @@ class FinancialTimeSeriesDB:
                 "volume": StorableFieldDef("volume", "Trading volume", {"unit": "shares"}),
             })
         """
-        self._storable_fields = {k.lower(): v for k, v in field_defs.items()}
+        # Clear existing storable fields from database and memory
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM storable_fields")
+            conn.commit()
+        self._storable_fields = {}
+
+        # Add new storable fields
+        for name, field_def in field_defs.items():
+            normalized = name.lower()
+            normalized_def = StorableFieldDef(
+                name=normalized,
+                description=field_def.description,
+                metadata=field_def.metadata
+            )
+            self._persist_storable_field(normalized_def)
+
         logger.info(f"Set storable fields to: {list(self._storable_fields.keys())}")
 
     def validate_field_name(self, field_name: str) -> None:
@@ -878,11 +962,11 @@ class FinancialTimeSeriesDB:
 
     def add_field(
         self,
-        instrument_id: int,
+        ticker: str,
         field_name: str,
         frequency: Frequency,
         unit: str = "",
-        alias_instrument_id: Optional[int] = None,
+        alias_ticker: Optional[str] = None,
         alias_field_id: Optional[int] = None,
         metadata: Optional[dict] = None
     ) -> InstrumentField:
@@ -894,11 +978,11 @@ class FinancialTimeSeriesDB:
         with any metadata provided here.
 
         Args:
-            instrument_id: ID of the parent instrument
+            ticker: Ticker symbol of the parent instrument (e.g., "AAPL")
             field_name: Name of the field (must be in storable fields registry)
             frequency: Data frequency
             unit: Unit of measurement (overrides storable field metadata unit if provided)
-            alias_instrument_id: If this is an alias, the target instrument ID
+            alias_ticker: If this is an alias, the ticker of the target instrument
             alias_field_id: If this is an alias, the target field ID
             metadata: Additional metadata (merged with storable field metadata)
 
@@ -906,10 +990,15 @@ class FinancialTimeSeriesDB:
             The created InstrumentField object
 
         Raises:
-            ValueError: If alias_instrument_id is set without alias_field_id or vice versa,
-                        or if field_name is not in the allowed storable fields list
+            ValueError: If ticker not found, if alias_ticker is set without alias_field_id
+                        or vice versa, or if field_name is not in the allowed storable fields list
             sqlite3.IntegrityError: If field already exists for this instrument/frequency
         """
+        # Look up instrument by ticker
+        instrument = self.get_instrument_by_ticker(ticker)
+        if not instrument:
+            raise ValueError(f"Instrument not found with ticker: {ticker}")
+
         # Validate field name against storable fields registry
         self.validate_field_name(field_name)
 
@@ -928,10 +1017,18 @@ class FinancialTimeSeriesDB:
         if not unit and storable_field and storable_field.metadata:
             unit = storable_field.metadata.get("unit", "")
 
-        if (alias_instrument_id is None) != (alias_field_id is None):
+        if (alias_ticker is None) != (alias_field_id is None):
             raise ValueError(
-                "Both alias_instrument_id and alias_field_id must be set together, or neither"
+                "Both alias_ticker and alias_field_id must be set together, or neither"
             )
+
+        # Look up alias instrument if provided
+        alias_instrument_id = None
+        if alias_ticker:
+            alias_instrument = self.get_instrument_by_ticker(alias_ticker)
+            if not alias_instrument:
+                raise ValueError(f"Alias instrument not found with ticker: {alias_ticker}")
+            alias_instrument_id = alias_instrument.id
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -941,7 +1038,7 @@ class FinancialTimeSeriesDB:
                  alias_instrument_id, alias_field_id, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (instrument_id, field_name, frequency.value, description, unit,
+                (instrument.id, field_name, frequency.value, description, unit,
                  alias_instrument_id, alias_field_id, json.dumps(merged_metadata))
             )
             conn.commit()
@@ -949,16 +1046,16 @@ class FinancialTimeSeriesDB:
             field = self.get_field(cursor.lastrowid)
             logger.info(
                 f"Added field: {field_name} ({frequency.value}) "
-                f"for instrument ID: {instrument_id}"
+                f"for instrument: {ticker}"
             )
             return field
 
     def add_alias_field(
         self,
-        instrument_id: int,
+        ticker: str,
         field_name: str,
         frequency: Frequency,
-        target_instrument_id: int,
+        target_ticker: str,
         target_field_name: str,
         target_frequency: Optional[Frequency] = None
     ) -> InstrumentField:
@@ -968,10 +1065,10 @@ class FinancialTimeSeriesDB:
         The field's description comes from the storable fields registry.
 
         Args:
-            instrument_id: ID of the instrument to add the alias to
+            ticker: Ticker of the instrument to add the alias to (e.g., "AAPL")
             field_name: Name for the alias field (must be in storable fields registry)
             frequency: Frequency of the alias
-            target_instrument_id: ID of the target instrument
+            target_ticker: Ticker of the target instrument (e.g., "SPX")
             target_field_name: Name of the target field
             target_frequency: Frequency of target field (defaults to same as alias)
 
@@ -979,26 +1076,31 @@ class FinancialTimeSeriesDB:
             The created alias field
 
         Raises:
-            ValueError: If target field not found or field_name not in storable fields
+            ValueError: If target instrument or field not found, or field_name not in storable fields
         """
         target_frequency = target_frequency or frequency
 
+        # Find the target instrument
+        target_instrument = self.get_instrument_by_ticker(target_ticker)
+        if not target_instrument:
+            raise ValueError(f"Target instrument not found with ticker: {target_ticker}")
+
         # Find the target field
         target_field = self.get_field_by_name(
-            target_instrument_id, target_field_name, target_frequency
+            target_instrument.id, target_field_name, target_frequency
         )
 
         if not target_field:
             raise ValueError(
-                f"Target field not found: instrument_id={target_instrument_id}, "
+                f"Target field not found: ticker={target_ticker}, "
                 f"field_name={target_field_name}, frequency={target_frequency.value}"
             )
 
         return self.add_field(
-            instrument_id=instrument_id,
+            ticker=ticker,
             field_name=field_name,
             frequency=frequency,
-            alias_instrument_id=target_instrument_id,
+            alias_ticker=target_ticker,
             alias_field_id=target_field.id
         )
 
@@ -1033,6 +1135,28 @@ class FinancialTimeSeriesDB:
             if row:
                 return self._row_to_field(row)
             return None
+
+    def get_field_by_ticker(
+        self,
+        ticker: str,
+        field_name: str,
+        frequency: Frequency
+    ) -> Optional[InstrumentField]:
+        """
+        Get a field by instrument ticker, field name, and frequency.
+
+        Args:
+            ticker: Ticker symbol of the instrument (e.g., "AAPL")
+            field_name: Name of the field
+            frequency: Data frequency
+
+        Returns:
+            InstrumentField if found, None otherwise
+        """
+        instrument = self.get_instrument_by_ticker(ticker)
+        if not instrument:
+            return None
+        return self.get_field_by_name(instrument.id, field_name, frequency)
 
     def list_fields(
         self,
@@ -1769,15 +1893,17 @@ class FinancialTimeSeriesDB:
 
 def create_database(
     db_path: str | Path = ":memory:",
-    storable_fields: Optional[set[str]] = None
+    storable_fields: Optional[dict[str, StorableFieldDef]] = None
 ) -> FinancialTimeSeriesDB:
     """
     Create a new financial time series database.
 
     Args:
         db_path: Path to the database file or ":memory:" for in-memory database
-        storable_fields: Optional set of allowed field names. If None, uses DEFAULT_STORABLE_FIELDS.
-                        Pass an empty set to disable field name validation.
+        storable_fields: Optional dict of allowed field definitions. If None and database
+                        has no existing storable fields, uses DEFAULT_STORABLE_FIELDS.
+                        Pass an empty dict to disable field name validation.
+                        Storable fields are persisted in the database.
 
     Returns:
         FinancialTimeSeriesDB instance
