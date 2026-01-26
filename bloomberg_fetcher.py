@@ -805,7 +805,6 @@ def get_or_setup_bloomberg_field(
     bloomberg_ticker: Optional[str] = None,
     bloomberg_field: Optional[str] = None,
     overrides: Optional[dict] = None,
-    description: str = "",
     priority: int = 0
 ) -> tuple[InstrumentField, ProviderConfig, bool]:
     """
@@ -817,17 +816,17 @@ def get_or_setup_bloomberg_field(
     - If it doesn't exist, create it with the provided Bloomberg settings
 
     The Bloomberg connection details are stored in the database's provider_configs
-    table and retrieved when fetching data.
+    table and retrieved when fetching data. Field description is automatically
+    retrieved from the storable fields registry.
 
     Args:
         db: FinancialTimeSeriesDB instance
         ticker: Instrument ticker in database (e.g., "AAPL", "SPX")
-        field_name: Internal field name (e.g., "price")
+        field_name: Internal field name (e.g., "price") - must be in storable fields registry
         frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
         bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity") - required for new fields
         bloomberg_field: Bloomberg field name (e.g., "PX_LAST") - required for new fields
         overrides: Optional Bloomberg field overrides
-        description: Field description (used only if creating new field)
         priority: Provider priority (used only if creating new field)
 
     Returns:
@@ -920,7 +919,6 @@ def get_or_setup_bloomberg_field(
         bloomberg_ticker=bloomberg_ticker,
         bloomberg_field=bloomberg_field,
         overrides=overrides,
-        description=description,
         priority=priority
     )
     return field, config, True
@@ -934,24 +932,23 @@ def setup_bloomberg_field(
     bloomberg_ticker: str,
     bloomberg_field: str,
     overrides: Optional[dict] = None,
-    description: str = "",
     priority: int = 0
 ) -> tuple[InstrumentField, ProviderConfig]:
     """
     Add a field with Bloomberg provider config in one call.
 
     The Bloomberg connection details (ticker, field, overrides) are stored
-    in the database and used when fetching data.
+    in the database and used when fetching data. The field description is
+    automatically retrieved from the storable fields registry.
 
     Args:
         db: FinancialTimeSeriesDB instance
         ticker: Instrument ticker in database (e.g., "AAPL", "SPX")
-        field_name: Internal field name (e.g., "price")
+        field_name: Internal field name (e.g., "price") - must be in storable fields registry
         frequency: Data frequency as string (e.g., "daily", "weekly")
         bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity", "SPX Index")
         bloomberg_field: Bloomberg field name (e.g., "PX_LAST", "TOT_RETURN_INDEX_GROSS_DVDS")
         overrides: Optional Bloomberg field overrides (e.g., {"BEST_FPERIOD_OVERRIDE": "1BF"})
-        description: Field description
         priority: Provider priority (lower = higher priority)
 
     Returns:
@@ -978,17 +975,12 @@ def setup_bloomberg_field(
             f"{', '.join(f.value for f in Frequency)}"
         )
 
-    # Look up instrument by ticker
-    instrument = db.get_instrument_by_ticker(ticker)
-    if not instrument:
-        raise ValueError(f"Instrument not found with ticker: {ticker}")
-
-    # Add the field
+    # Add the field using ticker string directly
+    # Description comes from storable fields registry
     field = db.add_field(
-        instrument_id=instrument.id,
+        ticker=ticker,
         field_name=field_name,
-        frequency=freq_enum,
-        description=description
+        frequency=freq_enum
     )
 
     # Create provider config with Bloomberg connection details
