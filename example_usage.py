@@ -100,82 +100,85 @@ def main():
     print(f"  Added: {unrate.ticker} - {unrate.name} (ID: {unrate.id})")
 
     # =========================================================================
-    # 3. Add Fields to Instruments
+    # 3. Register storable fields and add fields to instruments
     # =========================================================================
+    print("\n📋 Registering storable fields...")
+
+    # Register additional field types with descriptions and metadata
+    # (price and pct total return are already registered by default)
+    db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
+    db.add_storable_field("value", "Generic value field", {"unit": "percent"})
+    db.add_storable_field("total_return", "Total return index", {"unit": "points"})
+
+    print("  Storable fields:", list(db.get_storable_fields().keys()))
+
     print("\n📋 Adding fields to instruments...")
 
-    # Apple fields
+    # Apple fields - description comes from storable field registry
     aapl_price_daily = db.add_field(
         instrument_id=apple.id,
-        field_name="PRICE",
+        field_name="price",
         frequency=Frequency.DAILY,
-        description="Last traded price",
         unit="USD"
     )
-    print(f"  Added: AAPL.PRICE (daily) - ID: {aapl_price_daily.id}")
+    print(f"  Added: AAPL.price (daily) - ID: {aapl_price_daily.id}")
+    print(f"    Description from registry: '{aapl_price_daily.description}'")
 
     aapl_price_weekly = db.add_field(
         instrument_id=apple.id,
-        field_name="PRICE",
+        field_name="price",
         frequency=Frequency.WEEKLY,
-        description="Weekly closing price",
         unit="USD"
     )
-    print(f"  Added: AAPL.PRICE (weekly) - ID: {aapl_price_weekly.id}")
+    print(f"  Added: AAPL.price (weekly) - ID: {aapl_price_weekly.id}")
 
     aapl_eps = db.add_field(
         instrument_id=apple.id,
-        field_name="EPS",
-        frequency=Frequency.QUARTERLY,
-        description="Earnings per share",
-        unit="USD"
+        field_name="eps",
+        frequency=Frequency.QUARTERLY
     )
-    print(f"  Added: AAPL.EPS (quarterly) - ID: {aapl_eps.id}")
+    print(f"  Added: AAPL.eps (quarterly) - ID: {aapl_eps.id}")
+    print(f"    Description from registry: '{aapl_eps.description}'")
 
     # S&P 500 fields
     spx_price = db.add_field(
         instrument_id=spx.id,
-        field_name="PRICE",
+        field_name="price",
         frequency=Frequency.DAILY,
-        description="Index level",
         unit="points"
     )
-    print(f"  Added: SPX.PRICE (daily) - ID: {spx_price.id}")
+    print(f"  Added: SPX.price (daily) - ID: {spx_price.id}")
 
     # S&P 500 Total Return - actual price field
     spxtr_price = db.add_field(
         instrument_id=spxtr.id,
-        field_name="PRICE",
+        field_name="price",
         frequency=Frequency.DAILY,
-        description="Total return index level",
         unit="points"
     )
-    print(f"  Added: SPXTR.PRICE (daily) - ID: {spxtr_price.id}")
+    print(f"  Added: SPXTR.price (daily) - ID: {spxtr_price.id}")
 
     # Unemployment rate field
     unrate_value = db.add_field(
         instrument_id=unrate.id,
-        field_name="VALUE",
-        frequency=Frequency.MONTHLY,
-        description="Unemployment rate value",
-        unit="percent"
+        field_name="value",
+        frequency=Frequency.MONTHLY
     )
-    print(f"  Added: UNRATE.VALUE (monthly) - ID: {unrate_value.id}")
+    print(f"  Added: UNRATE.value (monthly) - ID: {unrate_value.id}")
 
     # =========================================================================
     # 4. Create Alias Field
     # =========================================================================
     print("\n🔗 Creating alias field...")
 
-    # Create TOTAL_RETURN field on SPX that points to SPXTR.PRICE
-    # This is the alias example from the requirements
+    # Create total_return field on SPX that points to SPXTR.price
+    # This is the alias example - description comes from storable field registry
     spx_total_return = db.add_alias_field(
         instrument_id=spx.id,
-        field_name="TOTAL_RETURN",
+        field_name="total_return",
         frequency=Frequency.DAILY,
         target_instrument_id=spxtr.id,
-        target_field_name="PRICE",
-        description="Alias for S&P 500 Total Return Index"
+        target_field_name="price"
     )
     print(f"  Added alias: SPX.TOTAL_RETURN -> SPXTR.PRICE (ID: {spx_total_return.id})")
 
@@ -498,14 +501,14 @@ def bloomberg_example():
     print(f"  Added: {apple.ticker} (ID: {apple.id})")
 
     # Use setup_bloomberg_field to add field with Bloomberg config
-    # Bloomberg connection details are explicitly provided and stored in DB
+    # All identifiers are strings - no numeric IDs needed
     price_field, price_config = setup_bloomberg_field(
         db=db,
-        instrument_id=apple.id,
-        field_name="price",
-        frequency=Frequency.DAILY,
-        bloomberg_ticker="AAPL US Equity",  # Full Bloomberg ticker
-        bloomberg_field="PX_LAST",           # Bloomberg field name
+        ticker="AAPL",                       # Instrument ticker (string)
+        field_name="price",                  # Field name (string)
+        frequency="daily",                   # Frequency (string)
+        bloomberg_ticker="AAPL US Equity",   # Bloomberg ticker (stored in DB)
+        bloomberg_field="PX_LAST",           # Bloomberg field (stored in DB)
         description="Daily closing price from Bloomberg"
     )
     print(f"  Added field: {price_field.field_name} with Bloomberg config")
@@ -523,8 +526,7 @@ def bloomberg_example():
     msft_price = db.add_field(
         instrument_id=msft.id,
         field_name="price",
-        frequency=Frequency.DAILY,
-        description="Daily closing price"
+        frequency=Frequency.DAILY
     )
 
     # Create Bloomberg config and store in DB
@@ -662,20 +664,24 @@ apple = db.add_instrument(
 )
 
 # Option 1: Use setup_bloomberg_field
-# Bloomberg config is stored in provider_configs table
+# All identifiers are strings - Bloomberg config is stored in provider_configs table
 field, config = setup_bloomberg_field(
     db=db,
-    instrument_id=apple.id,
-    field_name="price",
-    frequency=Frequency.DAILY,
-    bloomberg_ticker="AAPL US Equity",  # Stored in DB
+    ticker="AAPL",                       # Instrument ticker (string)
+    field_name="price",                  # Field name (string)
+    frequency="daily",                   # Frequency (string)
+    bloomberg_ticker="AAPL US Equity",   # Stored in DB
     bloomberg_field="PX_LAST",           # Stored in DB
     overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}  # Stored in DB
 )
 
-# Option 2: Manual configuration
+# Option 2: Manual configuration (if you need more control)
+# First register the field type, then add the field
+db.add_storable_field("total_return", "Total return index", {"unit": "points"})
+
+instrument = db.get_instrument_by_ticker("AAPL")
 price_field = db.add_field(
-    instrument_id=apple.id,
+    instrument_id=instrument.id,
     field_name="total_return",
     frequency=Frequency.DAILY
 )

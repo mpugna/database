@@ -76,11 +76,27 @@ class DataProvider(Enum):
 # Storable Fields Registry
 # =============================================================================
 
+@dataclass
+class StorableFieldDef:
+    """Definition of a storable field with its metadata."""
+    name: str
+    description: str = ""
+    metadata: dict = field(default_factory=dict)
+
+
 # Default storable fields that are allowed in the database.
-# Users can add or remove fields from this set via the database instance methods.
-DEFAULT_STORABLE_FIELDS: set[str] = {
-    "price",
-    "pct total return",
+# Users can add or remove fields via the database instance methods.
+DEFAULT_STORABLE_FIELDS: dict[str, StorableFieldDef] = {
+    "price": StorableFieldDef(
+        name="price",
+        description="Last traded price",
+        metadata={"unit": "currency"}
+    ),
+    "pct total return": StorableFieldDef(
+        name="pct total return",
+        description="Percentage total return including dividends",
+        metadata={"unit": "percent"}
+    ),
 }
 
 
@@ -297,15 +313,15 @@ class FinancialTimeSeriesDB:
     def __init__(
         self,
         db_path: str | Path = ":memory:",
-        storable_fields: Optional[set[str]] = None
+        storable_fields: Optional[dict[str, StorableFieldDef]] = None
     ):
         """
         Initialize the database connection.
 
         Args:
             db_path: Path to the SQLite database file. Use ":memory:" for in-memory database.
-            storable_fields: Optional set of allowed field names. If None, uses DEFAULT_STORABLE_FIELDS.
-                            Pass an empty set to disable field name validation.
+            storable_fields: Optional dict of allowed field definitions. If None, uses DEFAULT_STORABLE_FIELDS.
+                            Pass an empty dict to disable field name validation.
         """
         self.db_path = Path(db_path) if db_path != ":memory:" else db_path
         self._is_memory = db_path == ":memory:"
@@ -313,9 +329,13 @@ class FinancialTimeSeriesDB:
 
         # Initialize storable fields registry (case-insensitive storage)
         if storable_fields is not None:
-            self._storable_fields: set[str] = {f.lower() for f in storable_fields}
+            self._storable_fields: dict[str, StorableFieldDef] = {
+                k.lower(): v for k, v in storable_fields.items()
+            }
         else:
-            self._storable_fields = {f.lower() for f in DEFAULT_STORABLE_FIELDS}
+            self._storable_fields = {
+                k.lower(): v for k, v in DEFAULT_STORABLE_FIELDS.items()
+            }
 
         # For in-memory databases, we need a persistent connection
         if self._is_memory:
@@ -358,30 +378,52 @@ class FinancialTimeSeriesDB:
     # Storable Fields Management
     # =========================================================================
 
-    def get_storable_fields(self) -> set[str]:
+    def get_storable_fields(self) -> dict[str, StorableFieldDef]:
         """
-        Get the current set of allowed storable field names.
+        Get the current dict of allowed storable field definitions.
 
         Returns:
-            Set of allowed field names (lowercase)
+            Dict mapping field names (lowercase) to StorableFieldDef objects
         """
         return self._storable_fields.copy()
 
-    def add_storable_field(self, field_name: str) -> None:
+    def get_storable_field(self, field_name: str) -> Optional[StorableFieldDef]:
         """
-        Add a new field name to the list of allowed storable fields.
+        Get a storable field definition by name.
+
+        Args:
+            field_name: The field name to look up (case-insensitive)
+
+        Returns:
+            StorableFieldDef if found, None otherwise
+        """
+        return self._storable_fields.get(field_name.lower())
+
+    def add_storable_field(
+        self,
+        field_name: str,
+        description: str = "",
+        metadata: Optional[dict] = None
+    ) -> None:
+        """
+        Add a new field definition to the list of allowed storable fields.
 
         Args:
             field_name: The field name to allow (case-insensitive)
+            description: Description of the field
+            metadata: Additional metadata for the field (e.g., {"unit": "USD"})
 
         Example:
-            db.add_storable_field("dividend yield")
-            db.add_storable_field("EPS")  # Stored as "eps"
+            db.add_storable_field("dividend yield", "Annual dividend yield", {"unit": "percent"})
+            db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
         """
         normalized = field_name.lower()
-        if normalized not in self._storable_fields:
-            self._storable_fields.add(normalized)
-            logger.info(f"Added storable field: {normalized}")
+        self._storable_fields[normalized] = StorableFieldDef(
+            name=normalized,
+            description=description,
+            metadata=metadata or {}
+        )
+        logger.info(f"Added storable field: {normalized}")
 
     def remove_storable_field(self, field_name: str) -> bool:
         """
@@ -398,7 +440,7 @@ class FinancialTimeSeriesDB:
         """
         normalized = field_name.lower()
         if normalized in self._storable_fields:
-            self._storable_fields.discard(normalized)
+            del self._storable_fields[normalized]
             logger.info(f"Removed storable field: {normalized}")
             return True
         return False
@@ -415,18 +457,21 @@ class FinancialTimeSeriesDB:
         """
         return field_name.lower() in self._storable_fields
 
-    def set_storable_fields(self, field_names: set[str]) -> None:
+    def set_storable_fields(self, field_defs: dict[str, StorableFieldDef]) -> None:
         """
-        Replace the entire set of allowed storable fields.
+        Replace the entire dict of allowed storable fields.
 
         Args:
-            field_names: New set of allowed field names
+            field_defs: New dict of field definitions
 
         Example:
-            db.set_storable_fields({"price", "volume", "open", "high", "low", "close"})
+            db.set_storable_fields({
+                "price": StorableFieldDef("price", "Last price", {"unit": "currency"}),
+                "volume": StorableFieldDef("volume", "Trading volume", {"unit": "shares"}),
+            })
         """
-        self._storable_fields = {f.lower() for f in field_names}
-        logger.info(f"Set storable fields to: {self._storable_fields}")
+        self._storable_fields = {k.lower(): v for k, v in field_defs.items()}
+        logger.info(f"Set storable fields to: {list(self._storable_fields.keys())}")
 
     def validate_field_name(self, field_name: str) -> None:
         """
@@ -443,11 +488,11 @@ class FinancialTimeSeriesDB:
             return
 
         if not self.is_storable_field(field_name):
-            allowed = ", ".join(sorted(self._storable_fields))
+            allowed = ", ".join(sorted(self._storable_fields.keys()))
             raise ValueError(
                 f"Field name '{field_name}' is not in the allowed storable fields list. "
                 f"Allowed fields: {allowed}. "
-                f"Use db.add_storable_field('{field_name.lower()}') to allow this field."
+                f"Use db.add_storable_field('{field_name.lower()}', description, metadata) to allow this field."
             )
 
     # =========================================================================
@@ -836,7 +881,6 @@ class FinancialTimeSeriesDB:
         instrument_id: int,
         field_name: str,
         frequency: Frequency,
-        description: str = "",
         unit: str = "",
         alias_instrument_id: Optional[int] = None,
         alias_field_id: Optional[int] = None,
@@ -845,15 +889,18 @@ class FinancialTimeSeriesDB:
         """
         Add a new field to an instrument.
 
+        The field's description is automatically retrieved from the storable fields
+        registry. Additional metadata from the storable field definition is merged
+        with any metadata provided here.
+
         Args:
             instrument_id: ID of the parent instrument
-            field_name: Name of the field (e.g., "PRICE", "EPS", "TOTAL_RETURN")
+            field_name: Name of the field (must be in storable fields registry)
             frequency: Data frequency
-            description: Optional description
-            unit: Unit of measurement
+            unit: Unit of measurement (overrides storable field metadata unit if provided)
             alias_instrument_id: If this is an alias, the target instrument ID
             alias_field_id: If this is an alias, the target field ID
-            metadata: Additional metadata
+            metadata: Additional metadata (merged with storable field metadata)
 
         Returns:
             The created InstrumentField object
@@ -866,12 +913,25 @@ class FinancialTimeSeriesDB:
         # Validate field name against storable fields registry
         self.validate_field_name(field_name)
 
+        # Get description and default metadata from storable field definition
+        storable_field = self.get_storable_field(field_name)
+        description = storable_field.description if storable_field else ""
+
+        # Merge metadata: storable field defaults + provided metadata
+        merged_metadata = {}
+        if storable_field and storable_field.metadata:
+            merged_metadata.update(storable_field.metadata)
+        if metadata:
+            merged_metadata.update(metadata)
+
+        # Use unit from storable field metadata if not explicitly provided
+        if not unit and storable_field and storable_field.metadata:
+            unit = storable_field.metadata.get("unit", "")
+
         if (alias_instrument_id is None) != (alias_field_id is None):
             raise ValueError(
                 "Both alias_instrument_id and alias_field_id must be set together, or neither"
             )
-
-        metadata = metadata or {}
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -882,7 +942,7 @@ class FinancialTimeSeriesDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (instrument_id, field_name, frequency.value, description, unit,
-                 alias_instrument_id, alias_field_id, json.dumps(metadata))
+                 alias_instrument_id, alias_field_id, json.dumps(merged_metadata))
             )
             conn.commit()
 
@@ -900,26 +960,26 @@ class FinancialTimeSeriesDB:
         frequency: Frequency,
         target_instrument_id: int,
         target_field_name: str,
-        target_frequency: Optional[Frequency] = None,
-        description: str = ""
+        target_frequency: Optional[Frequency] = None
     ) -> InstrumentField:
         """
         Convenience method to add an alias field that points to another instrument's field.
 
+        The field's description comes from the storable fields registry.
+
         Args:
             instrument_id: ID of the instrument to add the alias to
-            field_name: Name for the alias field
+            field_name: Name for the alias field (must be in storable fields registry)
             frequency: Frequency of the alias
             target_instrument_id: ID of the target instrument
             target_field_name: Name of the target field
             target_frequency: Frequency of target field (defaults to same as alias)
-            description: Optional description
 
         Returns:
             The created alias field
 
         Raises:
-            ValueError: If target field not found
+            ValueError: If target field not found or field_name not in storable fields
         """
         target_frequency = target_frequency or frequency
 
@@ -938,7 +998,6 @@ class FinancialTimeSeriesDB:
             instrument_id=instrument_id,
             field_name=field_name,
             frequency=frequency,
-            description=description or f"Alias for {target_field_name}",
             alias_instrument_id=target_instrument_id,
             alias_field_id=target_field.id
         )
