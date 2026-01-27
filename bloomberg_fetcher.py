@@ -95,27 +95,40 @@ class BloombergFetcher:
     - Historical data requests (HistoricalDataRequest)
     - Reference data requests (ReferenceDataRequest)
     - Automatic storage of fetched data into the database
+    - Incremental fetching (only fetches data after the last date in DB)
+    - Percent change transformation (configurable per field)
 
     All methods use string identifiers (ticker, field_name, frequency) instead of
     numeric IDs for a cleaner API.
+
+    Features:
+    - Automatically checks existing data in DB before fetching
+    - Only fetches data from the day after the last available date
+    - No duplicate data is stored
+    - Optional percent change transformation (configured in provider config)
 
     Example:
         db = FinancialTimeSeriesDB("my_db.sqlite")
         fetcher = BloombergFetcher(db)
 
-        # Fetch historical prices for a field
+        # Fetch historical prices - automatically starts from last date in DB
         fetcher.fetch_historical_data(
             ticker="AAPL",
             field_name="price",
             frequency="daily",
-            start_date=date(2024, 1, 1),
+            start_date=date(2024, 1, 1),  # Only used if no data exists
             end_date=date(2024, 12, 31)
         )
 
-        # Or fetch for all Bloomberg-configured fields of an instrument
-        fetcher.fetch_all_instrument_data(
+        # Set up a field with percent change transformation
+        setup_bloomberg_field(
+            db=db,
             ticker="AAPL",
-            start_date=date(2024, 1, 1)
+            field_name="price_change",
+            frequency="daily",
+            bloomberg_ticker="AAPL US Equity",
+            bloomberg_field="PX_LAST",
+            pct_change=True  # Store percent changes instead of raw values
         )
     """
 
@@ -216,25 +229,32 @@ class BloombergFetcher:
         """
         Fetch historical data for a field from Bloomberg.
 
+        Automatically checks for existing data in the database:
+        - If data exists, starts from the day after the last available date
+        - Only stores new data points (no duplicates)
+        - Applies percent change transformation if configured in provider config
+
         Uses the ProviderConfig associated with the field to determine
-        the Bloomberg security and field to request.
+        the Bloomberg security, field, and transformation to apply.
 
         Args:
             ticker: Instrument ticker (e.g., "AAPL", "SPX")
             field_name: Name of the field (e.g., "price")
             frequency: Data frequency (e.g., "daily", "weekly")
-            start_date: Start date for historical data (required if no data in DB)
+            start_date: Start date for historical data (used only if no data in DB)
             end_date: End date (defaults to today)
             store: If True, automatically store fetched data in the database
 
         Returns:
-            List of BloombergDataPoint objects
+            List of BloombergDataPoint objects (after any transformations)
 
         Raises:
-            ValueError: If no Bloomberg config found for field
+            ValueError: If no Bloomberg config found for field, or no start_date
+                       when DB is empty
             RuntimeError: If not connected to Bloomberg
         """
         self._ensure_connected()
+        from datetime import timedelta
 
         end_date = end_date or (date.today() - timedelta(days=1))
 
@@ -257,30 +277,109 @@ class BloombergFetcher:
         bb_field = bloomberg_config.config.get("field", "PX_LAST")
         overrides = bloomberg_config.config.get("overrides", {})
         periodicity = bloomberg_config.config.get("periodicity", "DAILY")
+        pct_change = bloomberg_config.config.get("pct_change", False)
 
         if not bb_ticker:
             raise ValueError(
                 f"Bloomberg config for {ticker}.{field_name} missing 'ticker' in config"
             )
 
-        if not start_date:
-            raise ValueError("start_date is required for fetch_historical_data")
+        # Check for existing data to determine actual start date
+        latest_point = self.db.get_latest_value(ticker, field_name, frequency, resolve_alias=False)
+
+        if latest_point:
+            # Start from the day after the last available date
+            if isinstance(latest_point.timestamp, datetime):
+                last_date = latest_point.timestamp.date()
+            else:
+                last_date = latest_point.timestamp
+
+            effective_start = last_date + timedelta(days=1)
+
+            # If we already have data up to or past end_date, nothing to fetch
+            if effective_start > end_date:
+                logger.info(
+                    f"No new data to fetch for {ticker}.{field_name}: "
+                    f"DB has data through {last_date}"
+                )
+                return []
+        else:
+            # No existing data, use provided start_date
+            if not start_date:
+                raise ValueError(
+                    f"No data exists in DB for {ticker}.{field_name} ({frequency}) "
+                    f"and no start_date was provided"
+                )
+            effective_start = start_date
+
+        logger.info(
+            f"Fetching {ticker}.{field_name} from {effective_start} to {end_date}"
+        )
 
         # Make the Bloomberg request
         data_points = self._request_historical_data(
             security=bb_ticker,
             fields=[bb_field],
-            start_date=start_date,
+            start_date=effective_start,
             end_date=end_date,
             overrides=overrides,
             periodicity=periodicity
         )
 
-        # Store in database if requested
+        # Apply percent change transformation if configured
+        if pct_change and data_points:
+            data_points = self._apply_pct_change(data_points, ticker, field_name, frequency)
+
+        # Store in database if requested (only new points, filtered by _store_data_points)
         if store and data_points:
             self._store_data_points(ticker, field_name, frequency, data_points)
 
         return data_points
+
+    def _apply_pct_change(
+        self,
+        data_points: list[BloombergDataPoint],
+        ticker: str,
+        field_name: str,
+        frequency: str
+    ) -> list[BloombergDataPoint]:
+        """
+        Apply percent change transformation to data points.
+
+        Uses the last value in the database as the base for the first point's
+        percent change calculation.
+
+        Args:
+            data_points: List of data points to transform
+            ticker: Instrument ticker
+            field_name: Field name
+            frequency: Data frequency
+
+        Returns:
+            List of transformed data points with percent change values
+        """
+        if not data_points:
+            return []
+
+        # Get the last value from DB to use as base for first pct change
+        latest_point = self.db.get_latest_value(ticker, field_name, frequency, resolve_alias=False)
+
+        transformed = []
+        prev_value = latest_point.value if latest_point else None
+
+        for dp in data_points:
+            if prev_value is not None and prev_value != 0:
+                pct_change_value = ((dp.value - prev_value) / prev_value) * 100
+                transformed.append(BloombergDataPoint(
+                    security=dp.security,
+                    field=dp.field,
+                    date=dp.date,
+                    value=pct_change_value
+                ))
+            # If no previous value, skip this point (can't calculate pct change)
+            prev_value = dp.value
+
+        return transformed
 
     def fetch_reference_data(
         self,
@@ -441,10 +540,11 @@ class BloombergFetcher:
         """
         Fetch data incrementally, starting from the latest date in DB or a default start date.
 
-        This is a convenience method that:
-        1. Looks up the existing field by (ticker, field_name, frequency)
-        2. Determines the start date (latest date in DB + 1 day, or default_start_date)
-        3. Fetches and optionally stores the data
+        This is a convenience method that wraps fetch_historical_data and returns
+        additional metadata about the fetch operation.
+
+        Note: fetch_historical_data now automatically handles incremental fetching,
+        so this method is mainly useful when you need the detailed info dict.
 
         Args:
             ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
@@ -475,7 +575,9 @@ class BloombergFetcher:
         """
         from datetime import timedelta
 
-        # Get field info
+        end_date = end_date or date.today()
+
+        # Get field info before fetch
         info = self.get_bloomberg_field_info(ticker, field_name, frequency)
         if not info:
             raise ValueError(
@@ -488,46 +590,39 @@ class BloombergFetcher:
                 f"No active Bloomberg config found for {ticker}.{field_name} ({frequency})"
             )
 
-        # Determine start date
+        # Determine what start date will be used
         if info["has_data"]:
-            # Start from the day after the latest data point
-            start_date = info["latest_date"] + timedelta(days=1)
+            effective_start = info["latest_date"] + timedelta(days=1)
         elif default_start_date:
-            start_date = default_start_date
+            effective_start = default_start_date
         else:
             raise ValueError(
                 f"No data exists in DB for {ticker}.{field_name} ({frequency}) and no "
                 f"default_start_date was provided"
             )
 
-        end_date = end_date or date.today()
-
-        # Check if we actually need to fetch
-        if start_date > end_date:
-            logger.info(
-                f"No new data to fetch for {ticker}.{field_name}: "
-                f"DB is up to date through {info['latest_date']}"
-            )
+        # Check if we would skip
+        if effective_start > end_date:
             return [], {
                 **info,
-                "start_date_used": start_date,
+                "start_date_used": effective_start,
                 "end_date_used": end_date,
                 "skipped": True,
             }
 
-        # Fetch the data
+        # Fetch the data (fetch_historical_data handles incremental logic)
         data_points = self.fetch_historical_data(
             ticker=ticker,
             field_name=field_name,
             frequency=frequency,
-            start_date=start_date,
+            start_date=default_start_date,  # Used only if no data in DB
             end_date=end_date,
             store=store
         )
 
         return data_points, {
             **info,
-            "start_date_used": start_date,
+            "start_date_used": effective_start,
             "end_date_used": end_date,
             "skipped": False,
         }
@@ -797,6 +892,7 @@ def create_bloomberg_config(
     bloomberg_ticker: str,
     bloomberg_field: str,
     overrides: Optional[dict] = None,
+    pct_change: bool = False,
 ) -> dict:
     """
     Create a Bloomberg provider config dictionary.
@@ -808,19 +904,28 @@ def create_bloomberg_config(
         bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity", "SPX Index")
         bloomberg_field: Bloomberg field name (e.g., "PX_LAST", "TOT_RETURN_INDEX_GROSS_DVDS")
         overrides: Optional Bloomberg field overrides (e.g., {"BEST_FPERIOD_OVERRIDE": "1BF"})
+        pct_change: If True, apply percent change transformation before storing data.
+                   The downloaded values will be converted to percentage changes.
 
     Returns:
         Config dict ready for use with add_provider_config()
 
     Example:
+        # Store raw prices
+        config = create_bloomberg_config(
+            bloomberg_ticker="AAPL US Equity",
+            bloomberg_field="PX_LAST"
+        )
+
+        # Store percent changes instead of raw values
         config = create_bloomberg_config(
             bloomberg_ticker="AAPL US Equity",
             bloomberg_field="PX_LAST",
-            overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}
+            pct_change=True
         )
         db.add_provider_config(
             ticker="AAPL",
-            field_name="price",
+            field_name="price_change",
             frequency="daily",
             provider=DataProvider.BLOOMBERG,
             config=config
@@ -830,6 +935,7 @@ def create_bloomberg_config(
         "ticker": bloomberg_ticker,
         "field": bloomberg_field,
         "overrides": overrides or {},
+        "pct_change": pct_change,
     }
 
 
@@ -845,6 +951,7 @@ def get_or_setup_bloomberg_field(
     bloomberg_ticker: Optional[str] = None,
     bloomberg_field: Optional[str] = None,
     overrides: Optional[dict] = None,
+    pct_change: bool = False,
     priority: int = 0
 ) -> tuple[InstrumentField, ProviderConfig, bool]:
     """
@@ -867,6 +974,8 @@ def get_or_setup_bloomberg_field(
         bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity") - required for new fields
         bloomberg_field: Bloomberg field name (e.g., "PX_LAST") - required for new fields
         overrides: Optional Bloomberg field overrides
+        pct_change: If True, apply percent change transformation before storing.
+                   Only used when creating a new field.
         priority: Provider priority (used only if creating new field)
 
     Returns:
@@ -885,14 +994,15 @@ def get_or_setup_bloomberg_field(
             frequency="daily"
         )
 
-        # Create new field (bloomberg params required)
+        # Create new field with percent change transformation
         field, config, created = get_or_setup_bloomberg_field(
             db=db,
             ticker="AAPL",
-            field_name="price",
+            field_name="price_change",
             frequency="daily",
             bloomberg_ticker="AAPL US Equity",
-            bloomberg_field="PX_LAST"
+            bloomberg_field="PX_LAST",
+            pct_change=True
         )
     """
     from financial_ts_db import Frequency
@@ -934,6 +1044,7 @@ def get_or_setup_bloomberg_field(
                 "ticker": bloomberg_ticker,
                 "field": bloomberg_field,
                 "overrides": overrides or {},
+                "pct_change": pct_change,
             }
             bloomberg_config = db.add_provider_config(
                 ticker=ticker,
@@ -961,6 +1072,7 @@ def get_or_setup_bloomberg_field(
         bloomberg_ticker=bloomberg_ticker,
         bloomberg_field=bloomberg_field,
         overrides=overrides,
+        pct_change=pct_change,
         priority=priority
     )
     return field, config, True
@@ -974,12 +1086,13 @@ def setup_bloomberg_field(
     bloomberg_ticker: str,
     bloomberg_field: str,
     overrides: Optional[dict] = None,
+    pct_change: bool = False,
     priority: int = 0
 ) -> tuple[InstrumentField, ProviderConfig]:
     """
     Add a field with Bloomberg provider config in one call.
 
-    The Bloomberg connection details (ticker, field, overrides) are stored
+    The Bloomberg connection details (ticker, field, overrides, pct_change) are stored
     in the database and used when fetching data. The field description is
     automatically retrieved from the storable fields registry.
 
@@ -991,12 +1104,15 @@ def setup_bloomberg_field(
         bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity", "SPX Index")
         bloomberg_field: Bloomberg field name (e.g., "PX_LAST", "TOT_RETURN_INDEX_GROSS_DVDS")
         overrides: Optional Bloomberg field overrides (e.g., {"BEST_FPERIOD_OVERRIDE": "1BF"})
+        pct_change: If True, apply percent change transformation before storing.
+                   Downloaded values will be converted to percentage changes.
         priority: Provider priority (lower = higher priority)
 
     Returns:
         Tuple of (InstrumentField, ProviderConfig)
 
     Example:
+        # Store raw prices
         field, config = setup_bloomberg_field(
             db=db,
             ticker="AAPL",
@@ -1004,6 +1120,17 @@ def setup_bloomberg_field(
             frequency="daily",
             bloomberg_ticker="AAPL US Equity",
             bloomberg_field="PX_LAST"
+        )
+
+        # Store percent changes
+        field, config = setup_bloomberg_field(
+            db=db,
+            ticker="AAPL",
+            field_name="price_change",
+            frequency="daily",
+            bloomberg_ticker="AAPL US Equity",
+            bloomberg_field="PX_LAST",
+            pct_change=True
         )
     """
     from financial_ts_db import Frequency
@@ -1030,6 +1157,7 @@ def setup_bloomberg_field(
         "ticker": bloomberg_ticker,
         "field": bloomberg_field,
         "overrides": overrides or {},
+        "pct_change": pct_change,
     }
 
     provider_config = db.add_provider_config(
