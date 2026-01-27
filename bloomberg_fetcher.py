@@ -818,7 +818,13 @@ def create_bloomberg_config(
             bloomberg_field="PX_LAST",
             overrides={"BEST_FPERIOD_OVERRIDE": "1BF"}
         )
-        db.add_provider_config(field_id, DataProvider.BLOOMBERG, config)
+        db.add_provider_config(
+            ticker="AAPL",
+            field_name="price",
+            frequency="daily",
+            provider=DataProvider.BLOOMBERG,
+            config=config
+        )
     """
     return {
         "ticker": bloomberg_ticker,
