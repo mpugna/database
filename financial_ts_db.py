@@ -133,8 +133,10 @@ class InstrumentField:
     description: str = ""
     unit: str = ""
     # Alias fields - if set, this field points to another instrument's field
-    alias_instrument_id: Optional[int] = None
-    alias_field_id: Optional[int] = None
+    # These are string identifiers for the public API
+    alias_ticker: Optional[str] = None
+    alias_field_name: Optional[str] = None
+    alias_frequency: Optional[str] = None
     metadata: dict = field(default_factory=dict)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -364,20 +366,15 @@ class FinancialTimeSeriesDB:
         )
     """
 
-    def __init__(
-        self,
-        db_path: str | Path = ":memory:",
-        storable_fields: Optional[dict[str, StorableFieldDef]] = None
-    ):
+    def __init__(self, db_path: str | Path = ":memory:"):
         """
         Initialize the database connection.
 
         Args:
             db_path: Path to the SQLite database file. Use ":memory:" for in-memory database.
-            storable_fields: Optional dict of allowed field definitions to initialize the database with.
-                            If None and database has no storable fields, uses DEFAULT_STORABLE_FIELDS.
-                            Pass an empty dict to disable field name validation.
-                            Storable fields are persisted in the database.
+
+        Storable fields are managed via the public API (add_storable_field, remove_storable_field)
+        and persisted in the database. On first initialization, default storable fields are added.
         """
         self.db_path = Path(db_path) if db_path != ":memory:" else db_path
         self._is_memory = db_path == ":memory:"
@@ -394,10 +391,9 @@ class FinancialTimeSeriesDB:
         self._storable_fields: dict[str, StorableFieldDef] = {}
         self._load_storable_fields_from_db()
 
-        # If database has no storable fields, populate with provided or defaults
+        # If database has no storable fields, populate with defaults
         if not self._storable_fields:
-            initial_fields = storable_fields if storable_fields is not None else DEFAULT_STORABLE_FIELDS
-            for name, field_def in initial_fields.items():
+            for name, field_def in DEFAULT_STORABLE_FIELDS.items():
                 self._persist_storable_field(field_def)
 
     def _create_connection(self) -> sqlite3.Connection:
@@ -510,7 +506,7 @@ class FinancialTimeSeriesDB:
                 (field_id,)
             ).fetchone()
             if row:
-                return self._row_to_field(row)
+                return self._row_to_field(row, conn)
             return None
 
     def _get_instrument_by_id(self, instrument_id: int) -> Optional[Instrument]:
@@ -1184,7 +1180,7 @@ class FinancialTimeSeriesDB:
             ).fetchone()
 
             if row:
-                return self._row_to_field(row)
+                return self._row_to_field(row, conn)
             return None
 
     def list_fields(
@@ -1226,7 +1222,7 @@ class FinancialTimeSeriesDB:
 
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [self._row_to_field(row) for row in rows]
+            return [self._row_to_field(row, conn) for row in rows]
 
     def get_aliases_for_field(
         self,
@@ -1242,7 +1238,7 @@ class FinancialTimeSeriesDB:
                 "SELECT * FROM instrument_fields WHERE alias_field_id = ?",
                 (field_id,)
             ).fetchall()
-            return [self._row_to_field(row) for row in rows]
+            return [self._row_to_field(row, conn) for row in rows]
 
     def resolve_alias(
         self,
@@ -1267,24 +1263,29 @@ class FinancialTimeSeriesDB:
         Raises:
             ValueError: If field not found or circular alias detected
         """
-        field_id = self._get_field_id(ticker, field_name, frequency)
         visited = set()
-        current_id = field_id
+        current_ticker = ticker
+        current_field_name = field_name
+        current_frequency = _to_frequency(frequency)
 
         while True:
-            if current_id in visited:
+            field_key = (current_ticker, current_field_name, current_frequency.value)
+            if field_key in visited:
                 raise ValueError(f"Circular alias detected")
 
-            visited.add(current_id)
-            field = self._get_field_by_id(current_id)
+            visited.add(field_key)
+            field = self.get_field(current_ticker, current_field_name, current_frequency)
 
             if not field:
                 raise ValueError(f"Field not found during alias resolution")
 
-            if field.alias_field_id is None:
+            if field.alias_ticker is None:
                 return field
 
-            current_id = field.alias_field_id
+            # Follow the alias chain
+            current_ticker = field.alias_ticker
+            current_field_name = field.alias_field_name
+            current_frequency = Frequency(field.alias_frequency)
 
     def update_field(
         self,
@@ -1861,17 +1862,14 @@ class FinancialTimeSeriesDB:
                 (field.id,)
             ).fetchone()
 
-        # Get alias info if applicable
+        # Get alias info if applicable (already resolved to strings in field object)
         alias_info = None
-        if field.alias_field_id:
-            target_field = self._get_field_by_id(field.alias_field_id)
-            if target_field:
-                target_instrument = self._get_instrument_by_id(target_field.instrument_id)
-                alias_info = {
-                    "target_ticker": target_instrument.ticker if target_instrument else None,
-                    "target_field": target_field.field_name,
-                    "target_frequency": target_field.frequency.value
-                }
+        if field.alias_ticker:
+            alias_info = {
+                "target_ticker": field.alias_ticker,
+                "target_field": field.alias_field_name,
+                "target_frequency": field.alias_frequency
+            }
 
         return {
             "field": asdict(field),
@@ -1939,8 +1937,42 @@ class FinancialTimeSeriesDB:
             updated_at=row['updated_at']
         )
 
-    def _row_to_field(self, row: sqlite3.Row) -> InstrumentField:
+    def _row_to_field(self, row: sqlite3.Row, conn: Optional[sqlite3.Connection] = None) -> InstrumentField:
         """Convert a database row to an InstrumentField object."""
+        # Resolve alias IDs to string identifiers
+        alias_ticker = None
+        alias_field_name = None
+        alias_frequency = None
+
+        if row['alias_field_id'] is not None:
+            # Need to look up the alias target to get string identifiers
+            if conn is None:
+                with self._get_connection() as c:
+                    alias_row = c.execute(
+                        """
+                        SELECT if2.field_name, if2.frequency, i.ticker
+                        FROM instrument_fields if2
+                        JOIN instruments i ON if2.instrument_id = i.id
+                        WHERE if2.id = ?
+                        """,
+                        (row['alias_field_id'],)
+                    ).fetchone()
+            else:
+                alias_row = conn.execute(
+                    """
+                    SELECT if2.field_name, if2.frequency, i.ticker
+                    FROM instrument_fields if2
+                    JOIN instruments i ON if2.instrument_id = i.id
+                    WHERE if2.id = ?
+                    """,
+                    (row['alias_field_id'],)
+                ).fetchone()
+
+            if alias_row:
+                alias_ticker = alias_row['ticker']
+                alias_field_name = alias_row['field_name']
+                alias_frequency = alias_row['frequency']
+
         return InstrumentField(
             id=row['id'],
             instrument_id=row['instrument_id'],
@@ -1948,8 +1980,9 @@ class FinancialTimeSeriesDB:
             frequency=Frequency(row['frequency']),
             description=row['description'],
             unit=row['unit'],
-            alias_instrument_id=row['alias_instrument_id'],
-            alias_field_id=row['alias_field_id'],
+            alias_ticker=alias_ticker,
+            alias_field_name=alias_field_name,
+            alias_frequency=alias_frequency,
             metadata=json.loads(row['metadata']) if row['metadata'] else {},
             created_at=row['created_at'],
             updated_at=row['updated_at']
@@ -1983,21 +2016,20 @@ class FinancialTimeSeriesDB:
 # Convenience Functions
 # =============================================================================
 
-def create_database(
-    db_path: str | Path = ":memory:",
-    storable_fields: Optional[dict[str, StorableFieldDef]] = None
-) -> FinancialTimeSeriesDB:
+def create_database(db_path: str | Path = ":memory:") -> FinancialTimeSeriesDB:
     """
     Create a new financial time series database.
 
     Args:
         db_path: Path to the database file or ":memory:" for in-memory database
-        storable_fields: Optional dict of allowed field definitions.
 
     Returns:
         FinancialTimeSeriesDB instance
+
+    Storable fields are managed via the public API (add_storable_field, etc.)
+    and persisted in the database. Default fields are added on first initialization.
     """
-    return FinancialTimeSeriesDB(db_path, storable_fields=storable_fields)
+    return FinancialTimeSeriesDB(db_path)
 
 
 def print_deletion_impact(impact: DeletionImpact) -> None:
