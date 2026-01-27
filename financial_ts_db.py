@@ -1465,7 +1465,8 @@ class FinancialTimeSeriesDB:
         provider: DataProvider,
         config: dict,
         is_active: bool = True,
-        priority: int = 0
+        priority: int = 0,
+        pct_change: bool = False
     ) -> ProviderConfig:
         """
         Add a data provider configuration for a field.
@@ -1478,11 +1479,16 @@ class FinancialTimeSeriesDB:
             config: Provider-specific configuration
             is_active: Whether this config is active
             priority: Priority for fetching (lower = higher priority)
+            pct_change: If True, apply percent change transformation before storing.
+                       Downloaded values will be converted to percentage changes.
 
         Returns:
             The created ProviderConfig
         """
         field_id = self._get_field_id(ticker, field_name, frequency)
+
+        # Merge pct_change into config
+        full_config = {**config, "pct_change": pct_change}
 
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -1490,7 +1496,7 @@ class FinancialTimeSeriesDB:
                 INSERT INTO provider_configs (field_id, provider, config, is_active, priority)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (field_id, provider.value, json.dumps(config), int(is_active), priority)
+                (field_id, provider.value, json.dumps(full_config), int(is_active), priority)
             )
             conn.commit()
 
@@ -1538,14 +1544,28 @@ class FinancialTimeSeriesDB:
         field_name: str,
         frequency: Union[str, Frequency],
         provider: DataProvider,
+        pct_change: Optional[bool] = None,
         **kwargs
     ) -> Optional[ProviderConfig]:
-        """Update a provider config."""
+        """
+        Update a provider config.
+
+        Args:
+            ticker: Ticker of the instrument
+            field_name: Name of the field
+            frequency: Data frequency
+            provider: Data provider type
+            pct_change: If provided, update the percent change transformation setting
+            **kwargs: Other fields to update (config, is_active, priority)
+
+        Returns:
+            Updated ProviderConfig or None if not found
+        """
         field_id = self._get_field_id(ticker, field_name, frequency)
 
         with self._get_connection() as conn:
             row = conn.execute(
-                "SELECT id FROM provider_configs WHERE field_id = ? AND provider = ?",
+                "SELECT id, config FROM provider_configs WHERE field_id = ? AND provider = ?",
                 (field_id, provider.value)
             ).fetchone()
 
@@ -1553,9 +1573,19 @@ class FinancialTimeSeriesDB:
                 return None
 
             config_id = row['id']
+            existing_config = json.loads(row['config']) if row['config'] else {}
 
         allowed_fields = {'config', 'is_active', 'priority'}
         updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
+
+        # Handle pct_change - merge into config
+        if pct_change is not None:
+            if 'config' in updates and isinstance(updates['config'], dict):
+                updates['config']['pct_change'] = pct_change
+            else:
+                # Merge with existing config
+                existing_config['pct_change'] = pct_change
+                updates['config'] = existing_config
 
         if not updates:
             return self._get_provider_config_by_id(config_id)
