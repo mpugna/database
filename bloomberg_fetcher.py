@@ -14,11 +14,11 @@ Author: Claude
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, Any
 from dataclasses import dataclass, field
 
-from financial_ts_db import (
+from .financial_ts_db import (
     FinancialTimeSeriesDB,
     DataProvider,
     ProviderConfig,
@@ -236,7 +236,7 @@ class BloombergFetcher:
         """
         self._ensure_connected()
 
-        end_date = end_date or date.today()
+        end_date = end_date or (date.today() - timedelta(days=1))
 
         # Get the Bloomberg provider config for this field
         configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
