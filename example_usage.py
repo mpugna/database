@@ -189,7 +189,9 @@ def main():
 
     # Bloomberg config for AAPL price
     aapl_bloomberg = db.add_provider_config(
-        field_id=aapl_price_daily.id,
+        ticker="AAPL",
+        field_name="price",
+        frequency=Frequency.DAILY,
         provider=DataProvider.BLOOMBERG,
         config={
             "ticker": "AAPL US Equity",
@@ -202,7 +204,9 @@ def main():
 
     # Yahoo Finance as backup
     aapl_yahoo = db.add_provider_config(
-        field_id=aapl_price_daily.id,
+        ticker="AAPL",
+        field_name="price",
+        frequency=Frequency.DAILY,
         provider=DataProvider.YAHOO_FINANCE,
         config={
             "symbol": "AAPL",
@@ -214,7 +218,9 @@ def main():
 
     # FRED config for unemployment rate
     unrate_fred = db.add_provider_config(
-        field_id=unrate_value.id,
+        ticker="UNRATE",
+        field_name="value",
+        frequency=Frequency.MONTHLY,
         provider=DataProvider.FRED,
         config={
             "series_id": "UNRATE",
@@ -234,7 +240,7 @@ def main():
         (base_date + timedelta(days=i), 180.0 + i * 0.5, {"volume": 50000000 + i * 1000000})
         for i in range(10)
     ]
-    count = db.add_time_series_bulk(aapl_price_daily.id, aapl_prices)
+    count = db.add_time_series_bulk("AAPL", "price", Frequency.DAILY, aapl_prices)
     print(f"  Added {count} daily price points for AAPL")
 
     # Add data for SPXTR (which SPX.TOTAL_RETURN aliases to)
@@ -242,15 +248,17 @@ def main():
         (base_date + timedelta(days=i), 4800.0 + i * 10, None)
         for i in range(10)
     ]
-    count = db.add_time_series_bulk(spxtr_price.id, spxtr_prices)
+    count = db.add_time_series_bulk("SPXTR", "price", Frequency.DAILY, spxtr_prices)
     print(f"  Added {count} daily price points for SPXTR")
 
     # Add unemployment data
     for i in range(6):
-        date = datetime(2024, i + 1, 1)
+        ts_date = datetime(2024, i + 1, 1)
         db.add_time_series_point(
-            field_id=unrate_value.id,
-            timestamp=date,
+            ticker="UNRATE",
+            field_name="value",
+            frequency=Frequency.MONTHLY,
+            timestamp=ts_date,
             value=3.5 + i * 0.1
         )
     print(f"  Added 6 monthly unemployment rate values")
@@ -261,20 +269,20 @@ def main():
     print("\n🔍 Querying data...")
 
     # Get latest AAPL price
-    latest_aapl = db.get_latest_value(aapl_price_daily.id)
+    latest_aapl = db.get_latest_value("AAPL", "price", Frequency.DAILY)
     print(f"  Latest AAPL price: ${latest_aapl.value:.2f} ({latest_aapl.timestamp.date()})")
 
     # Get time series with date range
     start = datetime(2024, 1, 4)
     end = datetime(2024, 1, 8)
-    aapl_series = db.get_time_series(aapl_price_daily.id, start_date=start, end_date=end)
+    aapl_series = db.get_time_series("AAPL", "price", Frequency.DAILY, start_date=start, end_date=end)
     print(f"  AAPL prices from {start.date()} to {end.date()}:")
     for point in aapl_series:
         print(f"    {point.timestamp.date()}: ${point.value:.2f}")
 
     # Get data through alias (SPX.TOTAL_RETURN -> SPXTR.PRICE)
     print(f"\n  Accessing SPX.TOTAL_RETURN (alias for SPXTR.PRICE):")
-    tr_data = db.get_time_series(spx_total_return.id, resolve_alias=True)
+    tr_data = db.get_time_series("SPX", "total_return", Frequency.DAILY, resolve_alias=True)
     for point in tr_data[:3]:  # Show first 3
         print(f"    {point.timestamp.date()}: {point.value:.2f}")
     print(f"    ... ({len(tr_data)} total points)")
@@ -284,7 +292,7 @@ def main():
     # =========================================================================
     print("\n📊 Getting full field information...")
 
-    info = db.get_full_field_info(aapl_price_daily.id)
+    info = db.get_full_field_info("AAPL", "price", Frequency.DAILY)
     print(f"  Field: {info['instrument']['ticker']}.{info['field']['field_name']}")
     print(f"  Frequency: {info['field']['frequency']}")
     print(f"  Provider configs: {len(info['provider_configs'])}")
@@ -301,12 +309,12 @@ def main():
 
     # Preview what would happen if we delete SPXTR
     print("\n  Previewing deletion of SPXTR (has alias pointing to it):")
-    impact = db.preview_deletion("instrument", spxtr.id)
+    impact = db.delete_instrument("SPXTR", dry_run=True, print_output=False)
     print_deletion_impact(impact)
 
     # Preview field deletion
     print("  Previewing deletion of AAPL.PRICE (daily):")
-    field_impact = db.preview_deletion("field", aapl_price_daily.id)
+    field_impact = db.delete_field("AAPL", "price", Frequency.DAILY, dry_run=True, print_output=False)
     print_deletion_impact(field_impact)
 
     # =========================================================================
@@ -316,17 +324,17 @@ def main():
 
     # Dry run with automatic output - prints impact report to stdout
     print("  Dry run with print_output=True (default):")
-    dry_impact = db.delete_instrument(spxtr.id, dry_run=True)
+    dry_impact = db.delete_instrument("SPXTR", dry_run=True)
     print(f"  Dry run completed. Would delete {len(dry_impact.fields_to_delete)} fields")
     print(f"  Would delete {len(dry_impact.aliases_to_delete)} alias references")
 
     # Dry run without output - silent mode for programmatic use
     print("\n  Dry run with print_output=False (silent mode):")
-    silent_impact = db.delete_instrument(spxtr.id, dry_run=True, print_output=False)
+    silent_impact = db.delete_instrument("SPXTR", dry_run=True, print_output=False)
     print(f"  Silent dry run completed. Impact available programmatically.")
 
     # Verify nothing was deleted
-    spxtr_check = db.get_instrument(spxtr.id)
+    spxtr_check = db.get_instrument("SPXTR")
     print(f"  SPXTR still exists: {spxtr_check is not None}")
 
     # =========================================================================
@@ -349,7 +357,7 @@ def main():
         print(f"    - {inst.ticker}: {inst.name}")
 
     # List fields for an instrument
-    apple_fields = db.list_fields(instrument_id=apple.id)
+    apple_fields = db.list_fields(ticker="AAPL")
     print(f"\n  Fields for AAPL:")
     for f in apple_fields:
         print(f"    - {f.field_name} ({f.frequency.value})")
@@ -361,37 +369,37 @@ def main():
 
     # Update instrument
     db.update_instrument(
-        apple.id,
+        "AAPL",
         metadata={"sector": "Technology", "industry": "Consumer Electronics", "updated": True}
     )
-    updated_apple = db.get_instrument(apple.id)
+    updated_apple = db.get_instrument("AAPL")
     print(f"  Updated AAPL metadata: {updated_apple.metadata}")
 
     # Update extra_data with merge (adds new fields while preserving existing)
     db.update_instrument_extra_data(
-        apple.id,
+        "AAPL",
         {"pe_ratio": 28.5, "dividend_yield": 0.5, "market_cap": 2800000000000}
     )
-    updated_apple = db.get_instrument(apple.id)
+    updated_apple = db.get_instrument("AAPL")
     print(f"  Updated AAPL extra_data: {updated_apple.extra_data}")
 
     # Add more extra_data (merges with existing)
-    db.update_instrument_extra_data(apple.id, {"beta": 1.25, "analyst_rating": "Buy"})
-    print(f"  Merged AAPL extra_data: {db.get_instrument_extra_data(apple.id)}")
+    db.update_instrument_extra_data("AAPL", {"beta": 1.25, "analyst_rating": "Buy"})
+    print(f"  Merged AAPL extra_data: {db.get_instrument_extra_data('AAPL')}")
 
     # Get a specific extra_data field
-    pe_ratio = db.get_instrument_extra_data(apple.id, "pe_ratio")
+    pe_ratio = db.get_instrument_extra_data("AAPL", "pe_ratio")
     print(f"  AAPL P/E ratio: {pe_ratio}")
 
     # Update field
-    db.update_field(aapl_price_daily.id, description="Last traded closing price (updated)")
-    updated_field = db.get_field(aapl_price_daily.id)
+    db.update_field("AAPL", "price", Frequency.DAILY, description="Last traded closing price (updated)")
+    updated_field = db.get_field("AAPL", "price", Frequency.DAILY)
     print(f"  Updated field description: {updated_field.description}")
 
     # Update provider config
-    db.update_provider_config(aapl_bloomberg.id, priority=2)  # Demote Bloomberg
-    db.update_provider_config(aapl_yahoo.id, priority=0)  # Promote Yahoo
-    configs = db.get_provider_configs_for_field(aapl_price_daily.id)
+    db.update_provider_config("AAPL", "price", Frequency.DAILY, DataProvider.BLOOMBERG, priority=2)  # Demote Bloomberg
+    db.update_provider_config("AAPL", "price", Frequency.DAILY, DataProvider.YAHOO_FINANCE, priority=0)  # Promote Yahoo
+    configs = db.get_provider_configs("AAPL", "price", Frequency.DAILY)
     print(f"  Updated provider priorities:")
     for c in configs:
         print(f"    - {c.provider.value}: priority {c.priority}")
@@ -413,15 +421,15 @@ def main():
     print("\n🗑️  Demonstrating actual deletion...")
 
     # Delete a provider config (simple deletion)
-    deleted = db.delete_provider_config(aapl_yahoo.id)
+    deleted = db.delete_provider_config("AAPL", "price", Frequency.DAILY, DataProvider.YAHOO_FINANCE)
     print(f"  Deleted Yahoo config: {deleted}")
 
     # Delete UNRATE and all its data
-    unrate_impact = db.delete_instrument(unrate.id, dry_run=False)
+    unrate_impact = db.delete_instrument("UNRATE", dry_run=False)
     print(f"  Deleted UNRATE: {unrate_impact.time_series_points_to_delete} data points removed")
 
     # Verify deletion
-    unrate_check = db.get_instrument_by_ticker("UNRATE")
+    unrate_check = db.get_instrument("UNRATE")
     print(f"  UNRATE exists: {unrate_check is not None}")
 
     # =========================================================================
@@ -538,7 +546,9 @@ def bloomberg_example():
     )
 
     db.add_provider_config(
-        field_id=msft_price.id,
+        ticker="MSFT",
+        field_name="price",
+        frequency="daily",
         provider=DataProvider.BLOOMBERG,
         config=msft_bb_config,
         priority=0
@@ -557,7 +567,9 @@ def bloomberg_example():
             # Fetch historical data for Apple
             print(f"\n  Fetching AAPL historical prices...")
             aapl_data = fetcher.fetch_historical_data(
-                field_id=price_field.id,
+                ticker="AAPL",
+                field_name="price",
+                frequency="daily",
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 1, 31),
                 store=True  # Automatically store in database
@@ -567,7 +579,9 @@ def bloomberg_example():
             # Fetch current/reference data
             print(f"\n  Fetching AAPL current price...")
             current = fetcher.fetch_reference_data(
-                field_id=price_field.id,
+                ticker="AAPL",
+                field_name="price",
+                frequency="daily",
                 store=True
             )
             if current:
@@ -576,13 +590,12 @@ def bloomberg_example():
             # Fetch all Bloomberg-configured fields for an instrument
             print(f"\n  Fetching all MSFT Bloomberg data...")
             all_msft_data = fetcher.fetch_all_instrument_data(
-                instrument_id=msft.id,
+                ticker="MSFT",
                 start_date=date(2024, 1, 1),
                 store=True
             )
-            for field_id, points in all_msft_data.items():
-                field = db.get_field(field_id)
-                print(f"    {field.field_name}: {len(points)} points")
+            for field_key, points in all_msft_data.items():
+                print(f"    {field_key}: {len(points)} points")
 
     except RuntimeError as e:
         print(f"\n  ⚠️  Bloomberg connection failed: {e}")
@@ -595,7 +608,9 @@ def bloomberg_example():
 
     # Get time series from database
     aapl_series = db.get_time_series(
-        field_id=price_field.id,
+        ticker="AAPL",
+        field_name="price",
+        frequency="daily",
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 10)
     )
@@ -613,10 +628,9 @@ def bloomberg_example():
     print("\n🔧 Retrieving Bloomberg config from database:")
 
     # The Bloomberg connection details are stored in provider_configs
-    configs = db.get_provider_configs_for_field(price_field.id)
+    configs = db.get_provider_configs("AAPL", "price", "daily")
     for cfg in configs:
         if cfg.provider == DataProvider.BLOOMBERG:
-            print(f"  Field ID: {cfg.field_id}")
             print(f"  Provider: {cfg.provider.value}")
             print(f"  Config from DB: {cfg.config}")
             print(f"    - ticker: {cfg.config.get('ticker')}")
@@ -638,6 +652,9 @@ def _show_bloomberg_example_code():
 # Key concept: All Bloomberg connection details (ticker, field, overrides)
 # are stored in the database's provider_configs table. When fetching data,
 # the fetcher reads the config from the DB - nothing is hardcoded.
+#
+# All methods use string identifiers (ticker, field_name, frequency) instead
+# of numeric IDs for a cleaner API.
 
 from financial_ts_db import (
     FinancialTimeSeriesDB, Frequency, InstrumentType, DataProvider
@@ -679,7 +696,7 @@ field, config = setup_bloomberg_field(
 # First register the field type, then add the field
 db.add_storable_field("total_return", "Total return index", {"unit": "points"})
 
-price_field = db.add_field(
+tr_field = db.add_field(
     ticker="AAPL",  # Use ticker string directly
     field_name="total_return",
     frequency=Frequency.DAILY
@@ -693,7 +710,9 @@ bb_config = create_bloomberg_config(
 )
 
 db.add_provider_config(
-    field_id=price_field.id,
+    ticker="AAPL",
+    field_name="total_return",
+    frequency="daily",
     provider=DataProvider.BLOOMBERG,
     config=bb_config  # Stored in DB
 )
@@ -707,36 +726,38 @@ with BloombergFetcher(db) as fetcher:
     # The fetcher reads Bloomberg config from the database
     # No hardcoded field mappings - everything comes from provider_configs
 
-    # Method 1: Fetch by field_id (reads config from DB)
+    # Method 1: Fetch by (ticker, field_name, frequency)
     data = fetcher.fetch_historical_data(
-        field_id=field.id,
+        ticker="AAPL",
+        field_name="price",
+        frequency="daily",
         start_date=date(2024, 1, 1),
         end_date=date(2024, 12, 31),
         store=True
     )
     print(f"Fetched {len(data)} data points")
 
-    # Method 2: Incremental fetch by ticker/field_name/frequency
+    # Method 2: Incremental fetch - auto-starts from latest date in DB
     # Looks up field in DB, gets Bloomberg config, fetches only new data
     data, info = fetcher.fetch_incremental_data(
         ticker="AAPL",
         field_name="price",
         frequency="daily",
-        default_start_date=date(2020, 1, 1)
+        default_start_date=date(2020, 1, 1)  # Only used if no data exists
     )
     print(f"Start date used: {info['start_date_used']}")
     print(f"Bloomberg config from DB: {info['bloomberg_config'].config}")
 
 # =============================================================================
-# Query: Data is stored with reference to the field
+# Query: Data is stored and retrieved using string identifiers
 # =============================================================================
 
-series = db.get_time_series(field.id)
+series = db.get_time_series("AAPL", "price", "daily")
 for point in series[-5:]:
     print(f"{point.timestamp.date()}: ${point.value:.2f}")
 
 # You can also check what config is stored
-configs = db.get_provider_configs_for_field(field.id)
+configs = db.get_provider_configs("AAPL", "price", "daily")
 for cfg in configs:
     print(f"Provider: {cfg.provider.value}, Config: {cfg.config}")
 '''
