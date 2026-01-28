@@ -425,7 +425,7 @@ class DataFetcher:
         Raises:
             ValueError: If no provider config found or no start_date when DB is empty
         """
-        end_date = end_date or date.today()
+        end_date = end_date or (date.today() - timedelta(days=1))
 
         self._log(f"--- fetch_historical_data ---")
         self._log(f"  {ticker}.{field_name} ({frequency})")
