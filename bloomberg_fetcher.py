@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from financial_ts_db import (
+from .financial_ts_db import (
     FinancialTimeSeriesDB,
     DataProvider,
     ProviderConfig,
