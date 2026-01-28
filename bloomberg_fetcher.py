@@ -106,10 +106,11 @@ class BloombergFetcher:
     - Only fetches data from the day after the last available date
     - No duplicate data is stored
     - Optional percent change transformation (configured in provider config)
+    - Verbose mode for debugging fetch issues
 
     Example:
         db = FinancialTimeSeriesDB("my_db.sqlite")
-        fetcher = BloombergFetcher(db)
+        fetcher = BloombergFetcher(db, verbose=True)  # Enable verbose logging
 
         # Fetch historical prices - automatically starts from last date in DB
         fetcher.fetch_historical_data(
@@ -137,7 +138,8 @@ class BloombergFetcher:
         db: FinancialTimeSeriesDB,
         host: str = "localhost",
         port: int = 8194,
-        auto_connect: bool = False
+        auto_connect: bool = False,
+        verbose: bool = False
     ):
         """
         Initialize the Bloomberg fetcher.
@@ -147,6 +149,7 @@ class BloombergFetcher:
             host: Bloomberg API host (default: localhost)
             port: Bloomberg API port (default: 8194 for Desktop API)
             auto_connect: If True, connect to Bloomberg immediately
+            verbose: If True, enable detailed logging for debugging
         """
         if not BLPAPI_AVAILABLE:
             raise ImportError(
@@ -156,11 +159,17 @@ class BloombergFetcher:
         self.db = db
         self.host = host
         self.port = port
+        self.verbose = verbose
         self._session: Optional[blpapi.Session] = None
         self._ref_data_service: Optional[Any] = None
 
         if auto_connect:
             self.connect()
+
+    def _log_verbose(self, message: str) -> None:
+        """Log a message if verbose mode is enabled."""
+        if self.verbose:
+            print(f"[BloombergFetcher] {message}")
 
     def connect(self) -> bool:
         """
@@ -169,7 +178,10 @@ class BloombergFetcher:
         Returns:
             True if connection successful, False otherwise
         """
+        self._log_verbose(f"Connecting to Bloomberg at {self.host}:{self.port}...")
+
         if self._session is not None:
+            self._log_verbose("Already connected to Bloomberg")
             logger.warning("Already connected to Bloomberg")
             return True
 
@@ -179,18 +191,23 @@ class BloombergFetcher:
 
         self._session = blpapi.Session(session_options)
 
+        self._log_verbose("Starting Bloomberg session...")
         if not self._session.start():
+            self._log_verbose("ERROR: Failed to start Bloomberg session")
             logger.error("Failed to start Bloomberg session")
             self._session = None
             return False
 
+        self._log_verbose("Opening //blp/refdata service...")
         if not self._session.openService("//blp/refdata"):
+            self._log_verbose("ERROR: Failed to open //blp/refdata service")
             logger.error("Failed to open //blp/refdata service")
             self._session.stop()
             self._session = None
             return False
 
         self._ref_data_service = self._session.getService("//blp/refdata")
+        self._log_verbose("Successfully connected to Bloomberg API")
         logger.info(f"Connected to Bloomberg API at {self.host}:{self.port}")
         return True
 
@@ -258,16 +275,24 @@ class BloombergFetcher:
 
         end_date = end_date or (date.today() - timedelta(days=1))
 
+        self._log_verbose(f"--- fetch_historical_data called ---")
+        self._log_verbose(f"  ticker={ticker}, field_name={field_name}, frequency={frequency}")
+        self._log_verbose(f"  start_date={start_date}, end_date={end_date}, store={store}")
+
         # Get the Bloomberg provider config for this field
+        self._log_verbose(f"Looking up provider configs for {ticker}.{field_name} ({frequency})...")
         configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
+        self._log_verbose(f"  Found {len(configs)} active config(s)")
         bloomberg_config = None
 
         for config in configs:
+            self._log_verbose(f"  Config: provider={config.provider}, config={config.config}")
             if config.provider == DataProvider.BLOOMBERG:
                 bloomberg_config = config
                 break
 
         if not bloomberg_config:
+            self._log_verbose("  ERROR: No Bloomberg config found!")
             raise ValueError(
                 f"No active Bloomberg config found for {ticker}.{field_name} ({frequency})"
             )
@@ -279,13 +304,23 @@ class BloombergFetcher:
         periodicity = bloomberg_config.config.get("periodicity", "DAILY")
         pct_change = bloomberg_config.config.get("pct_change", False)
 
+        self._log_verbose(f"Bloomberg config extracted:")
+        self._log_verbose(f"  bb_ticker={bb_ticker}")
+        self._log_verbose(f"  bb_field={bb_field}")
+        self._log_verbose(f"  overrides={overrides}")
+        self._log_verbose(f"  periodicity={periodicity}")
+        self._log_verbose(f"  pct_change={pct_change}")
+
         if not bb_ticker:
+            self._log_verbose("  ERROR: Bloomberg config missing 'ticker' key!")
             raise ValueError(
                 f"Bloomberg config for {ticker}.{field_name} missing 'ticker' in config"
             )
 
         # Check for existing data to determine actual start date
+        self._log_verbose(f"Checking for existing data in DB...")
         latest_point = self.db.get_latest_value(ticker, field_name, frequency, resolve_alias=False)
+        self._log_verbose(f"  latest_point={latest_point}")
 
         if latest_point:
             # Start from the day after the last available date
@@ -295,9 +330,12 @@ class BloombergFetcher:
                 last_date = latest_point.timestamp
 
             effective_start = last_date + timedelta(days=1)
+            self._log_verbose(f"  Existing data found through {last_date}")
+            self._log_verbose(f"  Effective start date: {effective_start}")
 
             # If we already have data up to or past end_date, nothing to fetch
             if effective_start > end_date:
+                self._log_verbose(f"  No new data needed (effective_start > end_date)")
                 logger.info(
                     f"No new data to fetch for {ticker}.{field_name}: "
                     f"DB has data through {last_date}"
@@ -305,13 +343,17 @@ class BloombergFetcher:
                 return []
         else:
             # No existing data, use provided start_date
+            self._log_verbose(f"  No existing data in DB")
             if not start_date:
+                self._log_verbose("  ERROR: No start_date provided and no data in DB!")
                 raise ValueError(
                     f"No data exists in DB for {ticker}.{field_name} ({frequency}) "
                     f"and no start_date was provided"
                 )
             effective_start = start_date
+            self._log_verbose(f"  Using provided start_date: {effective_start}")
 
+        self._log_verbose(f"Will request data from {effective_start} to {end_date}")
         logger.info(
             f"Fetching {ticker}.{field_name} from {effective_start} to {end_date}"
         )
@@ -325,15 +367,29 @@ class BloombergFetcher:
             overrides=overrides,
             periodicity=periodicity
         )
+        self._log_verbose(f"Bloomberg returned {len(data_points)} data points")
+        if data_points and self.verbose:
+            self._log_verbose(f"  First point: date={data_points[0].date}, value={data_points[0].value}")
+            if len(data_points) > 1:
+                self._log_verbose(f"  Last point: date={data_points[-1].date}, value={data_points[-1].value}")
 
         # Apply percent change transformation if configured
         if pct_change and data_points:
+            self._log_verbose(f"Applying pct_change transformation...")
             data_points = self._apply_pct_change(data_points, ticker, field_name, frequency)
+            self._log_verbose(f"  After pct_change: {len(data_points)} data points")
 
         # Store in database if requested (only new points, filtered by _store_data_points)
         if store and data_points:
-            self._store_data_points(ticker, field_name, frequency, data_points)
+            self._log_verbose(f"Storing {len(data_points)} data points in DB...")
+            stored_count = self._store_data_points(ticker, field_name, frequency, data_points)
+            self._log_verbose(f"  Stored {stored_count} data points")
+        elif not store:
+            self._log_verbose(f"store=False, skipping database storage")
+        elif not data_points:
+            self._log_verbose(f"No data points to store")
 
+        self._log_verbose(f"--- fetch_historical_data complete, returning {len(data_points)} points ---")
         return data_points
 
     def _apply_pct_change(
@@ -358,14 +414,20 @@ class BloombergFetcher:
         Returns:
             List of transformed data points with percent change values
         """
+        self._log_verbose(f"--- _apply_pct_change ---")
+        self._log_verbose(f"  Input: {len(data_points)} data points")
+
         if not data_points:
+            self._log_verbose(f"  No data points to transform")
             return []
 
         # Get the last value from DB to use as base for first pct change
         latest_point = self.db.get_latest_value(ticker, field_name, frequency, resolve_alias=False)
+        self._log_verbose(f"  Latest point in DB: {latest_point}")
 
         transformed = []
         prev_value = latest_point.value if latest_point else None
+        skipped_count = 0
 
         for dp in data_points:
             if prev_value is not None and prev_value != 0:
@@ -376,9 +438,12 @@ class BloombergFetcher:
                     date=dp.date,
                     value=pct_change_value
                 ))
-            # If no previous value, skip this point (can't calculate pct change)
+            else:
+                # If no previous value, skip this point (can't calculate pct change)
+                skipped_count += 1
             prev_value = dp.value
 
+        self._log_verbose(f"  Output: {len(transformed)} transformed points, {skipped_count} skipped")
         return transformed
 
     def fetch_reference_data(
@@ -696,6 +761,14 @@ class BloombergFetcher:
         periodicity: str = "DAILY"
     ) -> list[BloombergDataPoint]:
         """Make a HistoricalDataRequest to Bloomberg."""
+        self._log_verbose(f"--- _request_historical_data ---")
+        self._log_verbose(f"  security={security}")
+        self._log_verbose(f"  fields={fields}")
+        self._log_verbose(f"  start_date={start_date} ({start_date.strftime('%Y%m%d')})")
+        self._log_verbose(f"  end_date={end_date} ({end_date.strftime('%Y%m%d')})")
+        self._log_verbose(f"  periodicity={periodicity}")
+        self._log_verbose(f"  overrides={overrides}")
+
         request = self._ref_data_service.createRequest("HistoricalDataRequest")
 
         request.getElement("securities").appendValue(security)
@@ -715,21 +788,45 @@ class BloombergFetcher:
                 override.setElement("fieldId", key)
                 override.setElement("value", str(value))
 
+        self._log_verbose(f"Sending request to Bloomberg...")
         self._session.sendRequest(request)
 
         data_points = []
+        event_count = 0
 
         while True:
             event = self._session.nextEvent(500)
+            event_count += 1
+            event_type_name = str(event.eventType())
+            self._log_verbose(f"  Event #{event_count}: type={event_type_name}")
 
             for msg in event:
+                self._log_verbose(f"    Message received: {msg.messageType()}")
+
+                # Check for errors in the response
+                if msg.hasElement("responseError"):
+                    error = msg.getElement("responseError")
+                    self._log_verbose(f"    RESPONSE ERROR: {error}")
+
                 if msg.hasElement("securityData"):
                     security_data = msg.getElement("securityData")
 
+                    # Check for security-level errors
+                    if security_data.hasElement("securityError"):
+                        sec_error = security_data.getElement("securityError")
+                        self._log_verbose(f"    SECURITY ERROR: {sec_error}")
+
+                    if security_data.hasElement("fieldExceptions"):
+                        field_exc = security_data.getElement("fieldExceptions")
+                        if field_exc.numValues() > 0:
+                            self._log_verbose(f"    FIELD EXCEPTIONS: {field_exc}")
+
                     if security_data.hasElement("fieldData"):
                         field_data_array = security_data.getElement("fieldData")
+                        num_values = field_data_array.numValues()
+                        self._log_verbose(f"    fieldData has {num_values} values")
 
-                        for i in range(field_data_array.numValues()):
+                        for i in range(num_values):
                             field_data = field_data_array.getValueAsElement(i)
 
                             point_date = field_data.getElementAsDatetime("date")
@@ -747,10 +844,18 @@ class BloombergFetcher:
                                         date=point_date,
                                         value=value
                                     ))
+                                else:
+                                    self._log_verbose(f"      Field {field_name} not in response for {point_date}")
+                    else:
+                        self._log_verbose(f"    No fieldData in securityData")
+                else:
+                    self._log_verbose(f"    No securityData in message")
 
             if event.eventType() == blpapi.Event.RESPONSE:
+                self._log_verbose(f"  Received final RESPONSE event")
                 break
 
+        self._log_verbose(f"--- _request_historical_data complete: {len(data_points)} points ---")
         logger.info(
             f"Fetched {len(data_points)} historical data points for {security}"
         )
@@ -823,7 +928,12 @@ class BloombergFetcher:
         data_points: list[BloombergDataPoint]
     ) -> int:
         """Store fetched data points in the database."""
+        self._log_verbose(f"--- _store_data_points ---")
+        self._log_verbose(f"  ticker={ticker}, field_name={field_name}, frequency={frequency}")
+        self._log_verbose(f"  data_points count: {len(data_points)}")
+
         if not data_points:
+            self._log_verbose(f"  No data points to store")
             return 0
 
         # Convert to format expected by bulk insert
@@ -836,7 +946,9 @@ class BloombergFetcher:
             for dp in data_points
         ]
 
+        self._log_verbose(f"  Calling db.add_time_series_bulk with {len(bulk_data)} records...")
         count = self.db.add_time_series_bulk(ticker, field_name, frequency, bulk_data)
+        self._log_verbose(f"  add_time_series_bulk returned: {count}")
         logger.info(f"Stored {count} data points for {ticker}.{field_name}")
         return count
 
