@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Optional, Any, Union
 from contextlib import contextmanager
 
+import pandas as pd
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -1733,7 +1735,7 @@ class FinancialTimeSeriesDB:
         start_date: Optional[datetime | date] = None,
         end_date: Optional[datetime | date] = None,
         resolve_alias: bool = True
-    ) -> list[TimeSeriesPoint]:
+    ) -> pd.Series:
         """
         Get time series data for a field.
 
@@ -1746,7 +1748,7 @@ class FinancialTimeSeriesDB:
             resolve_alias: If True and field is an alias, get data from target field
 
         Returns:
-            List of TimeSeriesPoint objects
+            pandas Series indexed by timestamp with the field name as series name
         """
         freq = _to_frequency(frequency)
         field_id = self._get_field_id(ticker, field_name, freq)
@@ -1757,7 +1759,7 @@ class FinancialTimeSeriesDB:
             resolved_field = self.resolve_alias(ticker, field_name, freq)
             actual_field_id = resolved_field.id
 
-        query = "SELECT * FROM time_series_data WHERE field_id = ?"
+        query = "SELECT timestamp, value FROM time_series_data WHERE field_id = ?"
         params: list[Any] = [actual_field_id]
 
         if start_date:
@@ -1776,7 +1778,9 @@ class FinancialTimeSeriesDB:
 
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
-            return [self._row_to_time_series_point(row) for row in rows]
+            timestamps = [row['timestamp'] for row in rows]
+            values = [row['value'] for row in rows]
+            return pd.Series(values, index=pd.DatetimeIndex(timestamps), name=field_name)
 
     def get_latest_value(
         self,
