@@ -277,14 +277,14 @@ def main():
     end = datetime(2024, 1, 8)
     aapl_series = db.get_time_series("AAPL", "price", Frequency.DAILY, start_date=start, end_date=end)
     print(f"  AAPL prices from {start.date()} to {end.date()}:")
-    for point in aapl_series:
-        print(f"    {point.timestamp.date()}: ${point.value:.2f}")
+    for timestamp, value in aapl_series.items():
+        print(f"    {timestamp.date()}: ${value:.2f}")
 
     # Get data through alias (SPX.TOTAL_RETURN -> SPXTR.PRICE)
     print(f"\n  Accessing SPX.TOTAL_RETURN (alias for SPXTR.PRICE):")
     tr_data = db.get_time_series("SPX", "total_return", Frequency.DAILY, resolve_alias=True)
-    for point in tr_data[:3]:  # Show first 3
-        print(f"    {point.timestamp.date()}: {point.value:.2f}")
+    for timestamp, value in list(tr_data.items())[:3]:  # Show first 3
+        print(f"    {timestamp.date()}: {value:.2f}")
     print(f"    ... ({len(tr_data)} total points)")
 
     # =========================================================================
@@ -615,10 +615,10 @@ def bloomberg_example():
         end_date=date(2024, 1, 10)
     )
 
-    if aapl_series:
+    if len(aapl_series) > 0:
         print(f"  AAPL prices (first 5):")
-        for point in aapl_series[:5]:
-            print(f"    {point.timestamp.date()}: ${point.value:.2f}")
+        for timestamp, value in list(aapl_series.items())[:5]:
+            print(f"    {timestamp.date()}: ${value:.2f}")
     else:
         print("  No data stored (Bloomberg connection may have failed)")
 
@@ -752,9 +752,10 @@ with BloombergFetcher(db) as fetcher:
 # Query: Data is stored and retrieved using string identifiers
 # =============================================================================
 
+# Returns a pandas Series indexed by timestamp, named after the field
 series = db.get_time_series("AAPL", "price", "daily")
-for point in series[-5:]:
-    print(f"{point.timestamp.date()}: ${point.value:.2f}")
+for timestamp, value in list(series.items())[-5:]:
+    print(f"{timestamp.date()}: ${value:.2f}")
 
 # You can also check what config is stored
 configs = db.get_provider_configs("AAPL", "price", "daily")

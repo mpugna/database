@@ -325,7 +325,7 @@ class TestAliasFields(unittest.TestCase):
         # Access through alias
         data = self.db.get_time_series(alias.id, resolve_alias=True)
         self.assertEqual(len(data), 1)
-        self.assertEqual(data[0].value, 4800.0)
+        self.assertEqual(data.iloc[0], 4800.0)
 
     def test_delete_target_removes_alias(self):
         """Test that deleting target instrument removes aliases."""
@@ -493,7 +493,7 @@ class TestTimeSeries(unittest.TestCase):
 
         series = self.db.get_time_series(self.field.id)
         self.assertEqual(len(series), 1)
-        self.assertEqual(series[0].value, 200.0)
+        self.assertEqual(series.iloc[0], 200.0)
 
 
 class TestDeletionPreview(unittest.TestCase):
