@@ -1,11 +1,11 @@
 """
 Bloomberg Data Fetcher for Financial Time Series Database
 
-This module provides integration with Bloomberg's blpapi to fetch
+This module provides integration with Bloomberg via the xbbg library to fetch
 financial data and store it in the FinancialTimeSeriesDB.
 
 Requires:
-    - blpapi: Bloomberg API Python library
+    - xbbg: High-level Bloomberg API wrapper (pip install xbbg)
     - A valid Bloomberg Terminal or B-PIPE connection
 
 Author: Claude
@@ -15,28 +15,29 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, date, timedelta
-from typing import Optional, Any
+from typing import Optional
 from dataclasses import dataclass, field
 
-from .financial_ts_db import (
+import pandas as pd
+
+from financial_ts_db import (
     FinancialTimeSeriesDB,
     DataProvider,
     ProviderConfig,
     InstrumentField,
-    TimeSeriesPoint,
 )
 
 logger = logging.getLogger(__name__)
 
-# Try to import blpapi - it may not be installed
+# Try to import xbbg - it may not be installed
 try:
-    import blpapi
-    BLPAPI_AVAILABLE = True
+    from xbbg import blp
+    XBBG_AVAILABLE = True
 except ImportError:
-    BLPAPI_AVAILABLE = False
+    XBBG_AVAILABLE = False
     logger.warning(
-        "blpapi not installed. Bloomberg fetching will not be available. "
-        "Install with: pip install blpapi"
+        "xbbg not installed. Bloomberg fetching will not be available. "
+        "Install with: pip install xbbg"
     )
 
 
@@ -56,6 +57,15 @@ SECURITY_TYPE_SUFFIXES = {
     "crypto": "Curncy",
 }
 
+# Periodicity mapping from our format to xbbg format
+PERIODICITY_MAP = {
+    "DAILY": "DAILY",
+    "WEEKLY": "WEEKLY",
+    "MONTHLY": "MONTHLY",
+    "QUARTERLY": "QUARTERLY",
+    "YEARLY": "YEARLY",
+}
+
 
 # =============================================================================
 # Data Classes
@@ -69,7 +79,7 @@ class BloombergRequest:
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     overrides: dict = field(default_factory=dict)
-    periodicity: str = "DAILY"  # DAILY, WEEKLY, MONTHLY, QUARTERLY, YEARLY
+    periodicity: str = "DAILY"
 
 
 @dataclass
@@ -90,34 +100,30 @@ class BloombergFetcher:
     """
     Fetches data from Bloomberg and stores it in FinancialTimeSeriesDB.
 
-    This class handles:
-    - Connection management to Bloomberg API
-    - Historical data requests (HistoricalDataRequest)
-    - Reference data requests (ReferenceDataRequest)
+    Uses the xbbg library for a simpler, more Pythonic interface to Bloomberg.
+    No explicit connection management is needed - xbbg handles this automatically.
+
+    Features:
+    - Historical data requests via blp.bdh()
+    - Reference data requests via blp.bdp()
     - Automatic storage of fetched data into the database
     - Incremental fetching (only fetches data after the last date in DB)
     - Percent change transformation (configurable per field)
+    - Verbose mode for debugging fetch issues
 
     All methods use string identifiers (ticker, field_name, frequency) instead of
     numeric IDs for a cleaner API.
 
-    Features:
-    - Automatically checks existing data in DB before fetching
-    - Only fetches data from the day after the last available date
-    - No duplicate data is stored
-    - Optional percent change transformation (configured in provider config)
-    - Verbose mode for debugging fetch issues
-
     Example:
         db = FinancialTimeSeriesDB("my_db.sqlite")
-        fetcher = BloombergFetcher(db, verbose=True)  # Enable verbose logging
+        fetcher = BloombergFetcher(db, verbose=True)
 
-        # Fetch historical prices - automatically starts from last date in DB
+        # Fetch historical prices
         fetcher.fetch_historical_data(
             ticker="AAPL",
             field_name="price",
             frequency="daily",
-            start_date=date(2024, 1, 1),  # Only used if no data exists
+            start_date=date(2024, 1, 1),
             end_date=date(2024, 12, 31)
         )
 
@@ -129,16 +135,13 @@ class BloombergFetcher:
             frequency="daily",
             bloomberg_ticker="AAPL US Equity",
             bloomberg_field="PX_LAST",
-            pct_change=True  # Store percent changes instead of raw values
+            pct_change=True
         )
     """
 
     def __init__(
         self,
         db: FinancialTimeSeriesDB,
-        host: str = "localhost",
-        port: int = 8194,
-        auto_connect: bool = False,
         verbose: bool = False
     ):
         """
@@ -146,89 +149,20 @@ class BloombergFetcher:
 
         Args:
             db: The FinancialTimeSeriesDB instance to store data in
-            host: Bloomberg API host (default: localhost)
-            port: Bloomberg API port (default: 8194 for Desktop API)
-            auto_connect: If True, connect to Bloomberg immediately
             verbose: If True, enable detailed logging for debugging
         """
-        if not BLPAPI_AVAILABLE:
+        if not XBBG_AVAILABLE:
             raise ImportError(
-                "blpapi is not installed. Please install it with: pip install blpapi"
+                "xbbg is not installed. Please install it with: pip install xbbg"
             )
 
         self.db = db
-        self.host = host
-        self.port = port
         self.verbose = verbose
-        self._session: Optional[blpapi.Session] = None
-        self._ref_data_service: Optional[Any] = None
-
-        if auto_connect:
-            self.connect()
 
     def _log_verbose(self, message: str) -> None:
         """Log a message if verbose mode is enabled."""
         if self.verbose:
             print(f"[BloombergFetcher] {message}")
-
-    def connect(self) -> bool:
-        """
-        Establish connection to Bloomberg API.
-
-        Returns:
-            True if connection successful, False otherwise
-        """
-        self._log_verbose(f"Connecting to Bloomberg at {self.host}:{self.port}...")
-
-        if self._session is not None:
-            self._log_verbose("Already connected to Bloomberg")
-            logger.warning("Already connected to Bloomberg")
-            return True
-
-        session_options = blpapi.SessionOptions()
-        session_options.setServerHost(self.host)
-        session_options.setServerPort(self.port)
-
-        self._session = blpapi.Session(session_options)
-
-        self._log_verbose("Starting Bloomberg session...")
-        if not self._session.start():
-            self._log_verbose("ERROR: Failed to start Bloomberg session")
-            logger.error("Failed to start Bloomberg session")
-            self._session = None
-            return False
-
-        self._log_verbose("Opening //blp/refdata service...")
-        if not self._session.openService("//blp/refdata"):
-            self._log_verbose("ERROR: Failed to open //blp/refdata service")
-            logger.error("Failed to open //blp/refdata service")
-            self._session.stop()
-            self._session = None
-            return False
-
-        self._ref_data_service = self._session.getService("//blp/refdata")
-        self._log_verbose("Successfully connected to Bloomberg API")
-        logger.info(f"Connected to Bloomberg API at {self.host}:{self.port}")
-        return True
-
-    def disconnect(self) -> None:
-        """Disconnect from Bloomberg API."""
-        if self._session is not None:
-            self._session.stop()
-            self._session = None
-            self._ref_data_service = None
-            logger.info("Disconnected from Bloomberg API")
-
-    def is_connected(self) -> bool:
-        """Check if connected to Bloomberg."""
-        return self._session is not None
-
-    def _ensure_connected(self) -> None:
-        """Ensure we're connected, raise if not."""
-        if not self.is_connected():
-            raise RuntimeError(
-                "Not connected to Bloomberg. Call connect() first or use auto_connect=True"
-            )
 
     # =========================================================================
     # Data Fetching Methods
@@ -251,9 +185,6 @@ class BloombergFetcher:
         - Only stores new data points (no duplicates)
         - Applies percent change transformation if configured in provider config
 
-        Uses the ProviderConfig associated with the field to determine
-        the Bloomberg security, field, and transformation to apply.
-
         Args:
             ticker: Instrument ticker (e.g., "AAPL", "SPX")
             field_name: Name of the field (e.g., "price")
@@ -268,12 +199,8 @@ class BloombergFetcher:
         Raises:
             ValueError: If no Bloomberg config found for field, or no start_date
                        when DB is empty
-            RuntimeError: If not connected to Bloomberg
         """
-        self._ensure_connected()
-        from datetime import timedelta
-
-        end_date = end_date or (date.today() - timedelta(days=1))
+        end_date = end_date or date.today()
 
         self._log_verbose(f"--- fetch_historical_data called ---")
         self._log_verbose(f"  ticker={ticker}, field_name={field_name}, frequency={frequency}")
@@ -358,10 +285,10 @@ class BloombergFetcher:
             f"Fetching {ticker}.{field_name} from {effective_start} to {end_date}"
         )
 
-        # Make the Bloomberg request
+        # Make the Bloomberg request using xbbg
         data_points = self._request_historical_data(
             security=bb_ticker,
-            fields=[bb_field],
+            field=bb_field,
             start_date=effective_start,
             end_date=end_date,
             overrides=overrides,
@@ -379,7 +306,7 @@ class BloombergFetcher:
             data_points = self._apply_pct_change(data_points, ticker, field_name, frequency)
             self._log_verbose(f"  After pct_change: {len(data_points)} data points")
 
-        # Store in database if requested (only new points, filtered by _store_data_points)
+        # Store in database if requested
         if store and data_points:
             self._log_verbose(f"Storing {len(data_points)} data points in DB...")
             stored_count = self._store_data_points(ticker, field_name, frequency, data_points)
@@ -391,6 +318,114 @@ class BloombergFetcher:
 
         self._log_verbose(f"--- fetch_historical_data complete, returning {len(data_points)} points ---")
         return data_points
+
+    def _request_historical_data(
+        self,
+        security: str,
+        field: str,
+        start_date: date,
+        end_date: date,
+        overrides: Optional[dict] = None,
+        periodicity: str = "DAILY"
+    ) -> list[BloombergDataPoint]:
+        """
+        Make a historical data request to Bloomberg using xbbg.
+
+        Args:
+            security: Bloomberg ticker (e.g., "AAPL US Equity")
+            field: Bloomberg field (e.g., "PX_LAST")
+            start_date: Start date
+            end_date: End date
+            overrides: Optional field overrides
+            periodicity: Data frequency (DAILY, WEEKLY, etc.)
+
+        Returns:
+            List of BloombergDataPoint objects
+        """
+        self._log_verbose(f"--- _request_historical_data (xbbg) ---")
+        self._log_verbose(f"  security={security}")
+        self._log_verbose(f"  field={field}")
+        self._log_verbose(f"  start_date={start_date}")
+        self._log_verbose(f"  end_date={end_date}")
+        self._log_verbose(f"  periodicity={periodicity}")
+        self._log_verbose(f"  overrides={overrides}")
+
+        try:
+            # Build kwargs for blp.bdh
+            kwargs = {
+                "tickers": security,
+                "flds": field,
+                "start_date": start_date,
+                "end_date": end_date,
+                "Per": periodicity,
+            }
+
+            # Add overrides if provided (filter out invalid ones)
+            if overrides and isinstance(overrides, dict):
+                valid_overrides = {
+                    k: v for k, v in overrides.items()
+                    if isinstance(k, str) and k and v is not None
+                }
+                if valid_overrides:
+                    self._log_verbose(f"  Applying overrides: {valid_overrides}")
+                    kwargs.update(valid_overrides)
+
+            self._log_verbose(f"Calling blp.bdh with kwargs: {kwargs}")
+
+            # Make the request
+            df = blp.bdh(**kwargs)
+
+            self._log_verbose(f"  Response DataFrame shape: {df.shape}")
+            self._log_verbose(f"  Response columns: {list(df.columns)}")
+
+            if df.empty:
+                self._log_verbose("  DataFrame is empty - no data returned")
+                return []
+
+            # Convert DataFrame to list of BloombergDataPoint
+            data_points = []
+
+            # xbbg returns a DataFrame with MultiIndex columns (ticker, field)
+            # or simple columns depending on the request
+            for idx, row in df.iterrows():
+                # idx is the date
+                if isinstance(idx, pd.Timestamp):
+                    point_date = idx.date()
+                else:
+                    point_date = idx
+
+                # Get the value - handle both single and multi-column responses
+                if isinstance(df.columns, pd.MultiIndex):
+                    # Multi-ticker or multi-field response
+                    value = row[(security, field)]
+                else:
+                    # Single ticker/field response
+                    if field in df.columns:
+                        value = row[field]
+                    else:
+                        # Column might be named differently
+                        value = row.iloc[0]
+
+                # Skip NaN values
+                if pd.isna(value):
+                    self._log_verbose(f"  Skipping NaN value for {point_date}")
+                    continue
+
+                data_points.append(BloombergDataPoint(
+                    security=security,
+                    field=field,
+                    date=point_date,
+                    value=float(value)
+                ))
+
+            self._log_verbose(f"--- _request_historical_data complete: {len(data_points)} points ---")
+            logger.info(f"Fetched {len(data_points)} historical data points for {security}")
+            return data_points
+
+        except Exception as e:
+            self._log_verbose(f"  ERROR: {type(e).__name__}: {e}")
+            logger.error(f"Bloomberg request failed: {e}")
+            raise
 
     def _apply_pct_change(
         self,
@@ -404,15 +439,6 @@ class BloombergFetcher:
 
         Uses the last value in the database as the base for the first point's
         percent change calculation.
-
-        Args:
-            data_points: List of data points to transform
-            ticker: Instrument ticker
-            field_name: Field name
-            frequency: Data frequency
-
-        Returns:
-            List of transformed data points with percent change values
         """
         self._log_verbose(f"--- _apply_pct_change ---")
         self._log_verbose(f"  Input: {len(data_points)} data points")
@@ -439,7 +465,6 @@ class BloombergFetcher:
                     value=pct_change_value
                 ))
             else:
-                # If no previous value, skip this point (can't calculate pct change)
                 skipped_count += 1
             prev_value = dp.value
 
@@ -467,7 +492,8 @@ class BloombergFetcher:
         Returns:
             BloombergDataPoint with current value, or None if not available
         """
-        self._ensure_connected()
+        self._log_verbose(f"--- fetch_reference_data ---")
+        self._log_verbose(f"  ticker={ticker}, field_name={field_name}")
 
         # Get the Bloomberg provider config for this field
         configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
@@ -492,10 +518,10 @@ class BloombergFetcher:
                 f"Bloomberg config for {ticker}.{field_name} missing 'ticker' in config"
             )
 
-        # Make the reference data request
+        # Make the reference data request using xbbg
         data_point = self._request_reference_data(
             security=bb_ticker,
-            fields=[bb_field],
+            field=bb_field,
             overrides=overrides
         )
 
@@ -503,6 +529,61 @@ class BloombergFetcher:
             self._store_data_points(ticker, field_name, frequency, [data_point])
 
         return data_point
+
+    def _request_reference_data(
+        self,
+        security: str,
+        field: str,
+        overrides: Optional[dict] = None
+    ) -> Optional[BloombergDataPoint]:
+        """Make a reference data request to Bloomberg using xbbg."""
+        self._log_verbose(f"--- _request_reference_data (xbbg) ---")
+        self._log_verbose(f"  security={security}, field={field}")
+
+        try:
+            # Build kwargs for blp.bdp
+            kwargs = {
+                "tickers": security,
+                "flds": field,
+            }
+
+            # Add overrides if provided
+            if overrides and isinstance(overrides, dict):
+                valid_overrides = {
+                    k: v for k, v in overrides.items()
+                    if isinstance(k, str) and k and v is not None
+                }
+                if valid_overrides:
+                    kwargs.update(valid_overrides)
+
+            self._log_verbose(f"Calling blp.bdp with kwargs: {kwargs}")
+
+            # Make the request
+            df = blp.bdp(**kwargs)
+
+            self._log_verbose(f"  Response: {df}")
+
+            if df.empty:
+                self._log_verbose("  No data returned")
+                return None
+
+            # Get the value
+            value = df.loc[security, field] if field in df.columns else df.iloc[0, 0]
+
+            if pd.isna(value):
+                return None
+
+            return BloombergDataPoint(
+                security=security,
+                field=field,
+                date=date.today(),
+                value=float(value)
+            )
+
+        except Exception as e:
+            self._log_verbose(f"  ERROR: {type(e).__name__}: {e}")
+            logger.error(f"Bloomberg reference request failed: {e}")
+            raise
 
     def get_bloomberg_field_info(
         self,
@@ -513,40 +594,11 @@ class BloombergFetcher:
         """
         Retrieve field info and Bloomberg config for an existing field.
 
-        This method looks up an existing field by (ticker, field_name, frequency)
-        and returns its Bloomberg configuration and the latest date available in the DB.
-
-        Args:
-            ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
-            field_name: Name of the field (e.g., "price", "pct total return")
-            frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
-
         Returns:
-            Dictionary with field info, or None if field/instrument not found:
-            {
-                "ticker": str,
-                "field_name": str,
-                "frequency": str,
-                "field": InstrumentField,
-                "instrument": Instrument,
-                "bloomberg_config": ProviderConfig or None,
-                "latest_date": date or None,  # Latest date in DB, None if no data
-                "has_data": bool,
-            }
-
-        Example:
-            info = fetcher.get_bloomberg_field_info(
-                ticker="AAPL",
-                field_name="price",
-                frequency="daily"
-            )
-            if info:
-                print(f"Latest date in DB: {info['latest_date']}")
-                print(f"Bloomberg ticker: {info['bloomberg_config'].config['ticker']}")
+            Dictionary with field info, or None if field/instrument not found
         """
         from financial_ts_db import Frequency
 
-        # Convert frequency string to enum
         try:
             freq_enum = Frequency(frequency.lower())
         except ValueError:
@@ -555,17 +607,14 @@ class BloombergFetcher:
                 f"{', '.join(f.value for f in Frequency)}"
             )
 
-        # Look up instrument by ticker
         instrument = self.db.get_instrument(ticker)
         if not instrument:
             return None
 
-        # Get the field
         field = self.db.get_field(ticker, field_name, freq_enum)
         if not field:
             return None
 
-        # Get Bloomberg config
         configs = self.db.get_provider_configs(ticker, field_name, frequency, active_only=True)
         bloomberg_config = None
         for config in configs:
@@ -573,7 +622,6 @@ class BloombergFetcher:
                 bloomberg_config = config
                 break
 
-        # Get latest date in DB
         latest_point = self.db.get_latest_value(ticker, field_name, frequency, resolve_alias=False)
         latest_date = None
         if latest_point:
@@ -593,105 +641,6 @@ class BloombergFetcher:
             "has_data": latest_date is not None,
         }
 
-    def fetch_incremental_data(
-        self,
-        ticker: str,
-        field_name: str,
-        frequency: str = "daily",
-        default_start_date: Optional[date] = None,
-        end_date: Optional[date] = None,
-        store: bool = True
-    ) -> tuple[list[BloombergDataPoint], dict]:
-        """
-        Fetch data incrementally, starting from the latest date in DB or a default start date.
-
-        This is a convenience method that wraps fetch_historical_data and returns
-        additional metadata about the fetch operation.
-
-        Note: fetch_historical_data now automatically handles incremental fetching,
-        so this method is mainly useful when you need the detailed info dict.
-
-        Args:
-            ticker: Instrument ticker (e.g., "AAPL", "SPX Index")
-            field_name: Name of the field (e.g., "price", "pct total return")
-            frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
-            default_start_date: Start date to use if no data exists in DB.
-                               If None and no data exists, raises ValueError.
-            end_date: End date for fetching (defaults to today)
-            store: If True, automatically store fetched data in the database
-
-        Returns:
-            Tuple of (list of BloombergDataPoint, info dict with field details)
-
-        Raises:
-            ValueError: If field not found, no Bloomberg config, or no default_start_date
-                       when DB is empty
-
-        Example:
-            # Fetch price data, starting from 2020-01-01 if no data exists
-            data, info = fetcher.fetch_incremental_data(
-                ticker="AAPL",
-                field_name="price",
-                frequency="daily",
-                default_start_date=date(2020, 1, 1)
-            )
-            print(f"Fetched {len(data)} new points")
-            print(f"Started from: {info['start_date_used']}")
-        """
-        from datetime import timedelta
-
-        end_date = end_date or date.today()
-
-        # Get field info before fetch
-        info = self.get_bloomberg_field_info(ticker, field_name, frequency)
-        if not info:
-            raise ValueError(
-                f"Field not found: ticker={ticker}, "
-                f"field_name={field_name}, frequency={frequency}"
-            )
-
-        if not info["bloomberg_config"]:
-            raise ValueError(
-                f"No active Bloomberg config found for {ticker}.{field_name} ({frequency})"
-            )
-
-        # Determine what start date will be used
-        if info["has_data"]:
-            effective_start = info["latest_date"] + timedelta(days=1)
-        elif default_start_date:
-            effective_start = default_start_date
-        else:
-            raise ValueError(
-                f"No data exists in DB for {ticker}.{field_name} ({frequency}) and no "
-                f"default_start_date was provided"
-            )
-
-        # Check if we would skip
-        if effective_start > end_date:
-            return [], {
-                **info,
-                "start_date_used": effective_start,
-                "end_date_used": end_date,
-                "skipped": True,
-            }
-
-        # Fetch the data (fetch_historical_data handles incremental logic)
-        data_points = self.fetch_historical_data(
-            ticker=ticker,
-            field_name=field_name,
-            frequency=frequency,
-            start_date=default_start_date,  # Used only if no data in DB
-            end_date=end_date,
-            store=store
-        )
-
-        return data_points, {
-            **info,
-            "start_date_used": effective_start,
-            "end_date_used": end_date,
-            "skipped": False,
-        }
-
     def fetch_all_instrument_data(
         self,
         ticker: str,
@@ -702,28 +651,17 @@ class BloombergFetcher:
         """
         Fetch data for all Bloomberg-configured fields of an instrument.
 
-        Args:
-            ticker: Ticker of the instrument (e.g., "AAPL", "SPX")
-            start_date: Start date for historical data
-            end_date: End date (defaults to today)
-            store: If True, automatically store fetched data
-
         Returns:
             Dict mapping field key (field_name:frequency) to list of BloombergDataPoint
         """
         results = {}
-
-        # Get all fields for this instrument
         fields = self.db.list_fields(ticker=ticker, include_aliases=False)
 
         for field in fields:
             freq_str = field.frequency.value
-
-            # Check if this field has a Bloomberg config
             configs = self.db.get_provider_configs(
                 ticker, field.field_name, freq_str, active_only=True
             )
-
             has_bloomberg = any(c.provider == DataProvider.BLOOMBERG for c in configs)
 
             if has_bloomberg:
@@ -748,175 +686,6 @@ class BloombergFetcher:
         return results
 
     # =========================================================================
-    # Bloomberg API Request Methods
-    # =========================================================================
-
-    def _request_historical_data(
-        self,
-        security: str,
-        fields: list[str],
-        start_date: date,
-        end_date: date,
-        overrides: Optional[dict] = None,
-        periodicity: str = "DAILY"
-    ) -> list[BloombergDataPoint]:
-        """Make a HistoricalDataRequest to Bloomberg."""
-        self._log_verbose(f"--- _request_historical_data ---")
-        self._log_verbose(f"  security={security}")
-        self._log_verbose(f"  fields={fields}")
-        self._log_verbose(f"  start_date={start_date} ({start_date.strftime('%Y%m%d')})")
-        self._log_verbose(f"  end_date={end_date} ({end_date.strftime('%Y%m%d')})")
-        self._log_verbose(f"  periodicity={periodicity}")
-        self._log_verbose(f"  overrides={overrides}")
-
-        request = self._ref_data_service.createRequest("HistoricalDataRequest")
-
-        request.getElement("securities").appendValue(security)
-
-        for field in fields:
-            request.getElement("fields").appendValue(field)
-
-        request.set("periodicitySelection", periodicity)
-        request.set("startDate", start_date.strftime("%Y%m%d"))
-        request.set("endDate", end_date.strftime("%Y%m%d"))
-
-        # Apply overrides if any
-        if overrides:
-            override_element = request.getElement("overrides")
-            for key, value in overrides.items():
-                override = override_element.appendElement()
-                override.setElement("fieldId", key)
-                override.setElement("value", str(value))
-
-        self._log_verbose(f"Sending request to Bloomberg...")
-        self._session.sendRequest(request)
-
-        data_points = []
-        event_count = 0
-
-        while True:
-            event = self._session.nextEvent(500)
-            event_count += 1
-            event_type_name = str(event.eventType())
-            self._log_verbose(f"  Event #{event_count}: type={event_type_name}")
-
-            for msg in event:
-                self._log_verbose(f"    Message received: {msg.messageType()}")
-
-                # Check for errors in the response
-                if msg.hasElement("responseError"):
-                    error = msg.getElement("responseError")
-                    self._log_verbose(f"    RESPONSE ERROR: {error}")
-
-                if msg.hasElement("securityData"):
-                    security_data = msg.getElement("securityData")
-
-                    # Check for security-level errors
-                    if security_data.hasElement("securityError"):
-                        sec_error = security_data.getElement("securityError")
-                        self._log_verbose(f"    SECURITY ERROR: {sec_error}")
-
-                    if security_data.hasElement("fieldExceptions"):
-                        field_exc = security_data.getElement("fieldExceptions")
-                        if field_exc.numValues() > 0:
-                            self._log_verbose(f"    FIELD EXCEPTIONS: {field_exc}")
-
-                    if security_data.hasElement("fieldData"):
-                        field_data_array = security_data.getElement("fieldData")
-                        num_values = field_data_array.numValues()
-                        self._log_verbose(f"    fieldData has {num_values} values")
-
-                        for i in range(num_values):
-                            field_data = field_data_array.getValueAsElement(i)
-
-                            point_date = field_data.getElementAsDatetime("date")
-                            point_date = date(
-                                point_date.year, point_date.month, point_date.day
-                            )
-
-                            for field_name in fields:
-                                if field_data.hasElement(field_name):
-                                    value = field_data.getElementAsFloat(field_name)
-
-                                    data_points.append(BloombergDataPoint(
-                                        security=security,
-                                        field=field_name,
-                                        date=point_date,
-                                        value=value
-                                    ))
-                                else:
-                                    self._log_verbose(f"      Field {field_name} not in response for {point_date}")
-                    else:
-                        self._log_verbose(f"    No fieldData in securityData")
-                else:
-                    self._log_verbose(f"    No securityData in message")
-
-            if event.eventType() == blpapi.Event.RESPONSE:
-                self._log_verbose(f"  Received final RESPONSE event")
-                break
-
-        self._log_verbose(f"--- _request_historical_data complete: {len(data_points)} points ---")
-        logger.info(
-            f"Fetched {len(data_points)} historical data points for {security}"
-        )
-        return data_points
-
-    def _request_reference_data(
-        self,
-        security: str,
-        fields: list[str],
-        overrides: Optional[dict] = None
-    ) -> Optional[BloombergDataPoint]:
-        """Make a ReferenceDataRequest to Bloomberg."""
-        request = self._ref_data_service.createRequest("ReferenceDataRequest")
-
-        request.getElement("securities").appendValue(security)
-
-        for field in fields:
-            request.getElement("fields").appendValue(field)
-
-        # Apply overrides if any
-        if overrides:
-            override_element = request.getElement("overrides")
-            for key, value in overrides.items():
-                override = override_element.appendElement()
-                override.setElement("fieldId", key)
-                override.setElement("value", str(value))
-
-        self._session.sendRequest(request)
-
-        result = None
-
-        while True:
-            event = self._session.nextEvent(500)
-
-            for msg in event:
-                if msg.hasElement("securityData"):
-                    security_data_array = msg.getElement("securityData")
-
-                    for i in range(security_data_array.numValues()):
-                        security_data = security_data_array.getValueAsElement(i)
-
-                        if security_data.hasElement("fieldData"):
-                            field_data = security_data.getElement("fieldData")
-
-                            for field_name in fields:
-                                if field_data.hasElement(field_name):
-                                    value = field_data.getElementAsFloat(field_name)
-
-                                    result = BloombergDataPoint(
-                                        security=security,
-                                        field=field_name,
-                                        date=date.today(),
-                                        value=value
-                                    )
-
-            if event.eventType() == blpapi.Event.RESPONSE:
-                break
-
-        return result
-
-    # =========================================================================
     # Storage Methods
     # =========================================================================
 
@@ -936,7 +705,6 @@ class BloombergFetcher:
             self._log_verbose(f"  No data points to store")
             return 0
 
-        # Convert to format expected by bulk insert
         bulk_data = [
             (
                 datetime.combine(dp.date, datetime.min.time()),
@@ -951,19 +719,6 @@ class BloombergFetcher:
         self._log_verbose(f"  add_time_series_bulk returned: {count}")
         logger.info(f"Stored {count} data points for {ticker}.{field_name}")
         return count
-
-    # =========================================================================
-    # Context Manager Support
-    # =========================================================================
-
-    def __enter__(self) -> "BloombergFetcher":
-        """Support context manager pattern."""
-        self.connect()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Disconnect when exiting context."""
-        self.disconnect()
 
 
 # =============================================================================
@@ -985,12 +740,6 @@ def format_bloomberg_ticker(
 
     Returns:
         Bloomberg-formatted ticker (e.g., "AAPL US Equity")
-
-    Example:
-        >>> format_bloomberg_ticker("AAPL", "stock", "US")
-        'AAPL US Equity'
-        >>> format_bloomberg_ticker("SPX", "index")
-        'SPX Index'
     """
     suffix = SECURITY_TYPE_SUFFIXES.get(security_type.lower(), "Equity")
 
@@ -1009,39 +758,14 @@ def create_bloomberg_config(
     """
     Create a Bloomberg provider config dictionary.
 
-    This helper creates the config dict to be stored in provider_configs table.
-    All Bloomberg connection details should be explicitly provided.
-
     Args:
-        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity", "SPX Index")
-        bloomberg_field: Bloomberg field name (e.g., "PX_LAST", "TOT_RETURN_INDEX_GROSS_DVDS")
-        overrides: Optional Bloomberg field overrides (e.g., {"BEST_FPERIOD_OVERRIDE": "1BF"})
-        pct_change: If True, apply percent change transformation before storing data.
-                   The downloaded values will be converted to percentage changes.
+        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity")
+        bloomberg_field: Bloomberg field name (e.g., "PX_LAST")
+        overrides: Optional Bloomberg field overrides
+        pct_change: If True, apply percent change transformation before storing
 
     Returns:
         Config dict ready for use with add_provider_config()
-
-    Example:
-        # Store raw prices
-        config = create_bloomberg_config(
-            bloomberg_ticker="AAPL US Equity",
-            bloomberg_field="PX_LAST"
-        )
-
-        # Store percent changes instead of raw values
-        config = create_bloomberg_config(
-            bloomberg_ticker="AAPL US Equity",
-            bloomberg_field="PX_LAST",
-            pct_change=True
-        )
-        db.add_provider_config(
-            ticker="AAPL",
-            field_name="price_change",
-            frequency="daily",
-            provider=DataProvider.BLOOMBERG,
-            config=config
-        )
     """
     return {
         "ticker": bloomberg_ticker,
@@ -1069,57 +793,11 @@ def get_or_setup_bloomberg_field(
     """
     Get an existing Bloomberg field or create it if it doesn't exist.
 
-    This function handles the common pattern of:
-    - Check if a field already exists for this (ticker, field_name, frequency)
-    - If it exists, return it along with its Bloomberg config from the database
-    - If it doesn't exist, create it with the provided Bloomberg settings
-
-    The Bloomberg connection details are stored in the database's provider_configs
-    table and retrieved when fetching data. Field description is automatically
-    retrieved from the storable fields registry.
-
-    Args:
-        db: FinancialTimeSeriesDB instance
-        ticker: Instrument ticker in database (e.g., "AAPL", "SPX")
-        field_name: Internal field name (e.g., "price") - must be in storable fields registry
-        frequency: Data frequency as string (e.g., "daily", "weekly", "monthly")
-        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity") - required for new fields
-        bloomberg_field: Bloomberg field name (e.g., "PX_LAST") - required for new fields
-        overrides: Optional Bloomberg field overrides
-        pct_change: If True, apply percent change transformation before storing.
-                   Only used when creating a new field.
-        priority: Provider priority (used only if creating new field)
-
     Returns:
         Tuple of (InstrumentField, ProviderConfig, was_created)
-        - was_created is True if the field was newly created, False if it already existed
-
-    Raises:
-        ValueError: If instrument not found, or if creating new field without bloomberg_ticker/bloomberg_field
-
-    Example:
-        # Get existing field (bloomberg params not needed if field exists)
-        field, config, created = get_or_setup_bloomberg_field(
-            db=db,
-            ticker="AAPL",
-            field_name="price",
-            frequency="daily"
-        )
-
-        # Create new field with percent change transformation
-        field, config, created = get_or_setup_bloomberg_field(
-            db=db,
-            ticker="AAPL",
-            field_name="price_change",
-            frequency="daily",
-            bloomberg_ticker="AAPL US Equity",
-            bloomberg_field="PX_LAST",
-            pct_change=True
-        )
     """
     from financial_ts_db import Frequency
 
-    # Convert frequency string to enum
     try:
         freq_enum = Frequency(frequency.lower())
     except ValueError:
@@ -1128,16 +806,13 @@ def get_or_setup_bloomberg_field(
             f"{', '.join(f.value for f in Frequency)}"
         )
 
-    # Look up instrument by ticker
     instrument = db.get_instrument(ticker)
     if not instrument:
         raise ValueError(f"Instrument not found with ticker: {ticker}")
 
-    # Check if field already exists
     existing_field = db.get_field(ticker, field_name, freq_enum)
 
     if existing_field:
-        # Field exists, get its Bloomberg config
         configs = db.get_provider_configs(ticker, field_name, frequency, active_only=True)
         bloomberg_config = None
         for config in configs:
@@ -1146,7 +821,6 @@ def get_or_setup_bloomberg_field(
                 break
 
         if not bloomberg_config:
-            # Field exists but has no Bloomberg config - add one
             if not bloomberg_ticker or not bloomberg_field:
                 raise ValueError(
                     f"Field exists but has no Bloomberg config. "
@@ -1169,7 +843,6 @@ def get_or_setup_bloomberg_field(
 
         return existing_field, bloomberg_config, False
 
-    # Field doesn't exist, create it
     if not bloomberg_ticker or not bloomberg_field:
         raise ValueError(
             f"Field does not exist. "
@@ -1204,50 +877,22 @@ def setup_bloomberg_field(
     """
     Add a field with Bloomberg provider config in one call.
 
-    The Bloomberg connection details (ticker, field, overrides, pct_change) are stored
-    in the database and used when fetching data. The field description is
-    automatically retrieved from the storable fields registry.
-
     Args:
         db: FinancialTimeSeriesDB instance
-        ticker: Instrument ticker in database (e.g., "AAPL", "SPX")
-        field_name: Internal field name (e.g., "price") - must be in storable fields registry
-        frequency: Data frequency as string (e.g., "daily", "weekly")
-        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity", "SPX Index")
-        bloomberg_field: Bloomberg field name (e.g., "PX_LAST", "TOT_RETURN_INDEX_GROSS_DVDS")
-        overrides: Optional Bloomberg field overrides (e.g., {"BEST_FPERIOD_OVERRIDE": "1BF"})
-        pct_change: If True, apply percent change transformation before storing.
-                   Downloaded values will be converted to percentage changes.
+        ticker: Instrument ticker in database
+        field_name: Internal field name (must be in storable fields registry)
+        frequency: Data frequency (e.g., "daily", "weekly")
+        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity")
+        bloomberg_field: Bloomberg field name (e.g., "PX_LAST")
+        overrides: Optional Bloomberg field overrides
+        pct_change: If True, apply percent change transformation
         priority: Provider priority (lower = higher priority)
 
     Returns:
         Tuple of (InstrumentField, ProviderConfig)
-
-    Example:
-        # Store raw prices
-        field, config = setup_bloomberg_field(
-            db=db,
-            ticker="AAPL",
-            field_name="price",
-            frequency="daily",
-            bloomberg_ticker="AAPL US Equity",
-            bloomberg_field="PX_LAST"
-        )
-
-        # Store percent changes
-        field, config = setup_bloomberg_field(
-            db=db,
-            ticker="AAPL",
-            field_name="price_change",
-            frequency="daily",
-            bloomberg_ticker="AAPL US Equity",
-            bloomberg_field="PX_LAST",
-            pct_change=True
-        )
     """
     from financial_ts_db import Frequency
 
-    # Convert frequency string to enum
     try:
         freq_enum = Frequency(frequency.lower())
     except ValueError:
@@ -1256,15 +901,12 @@ def setup_bloomberg_field(
             f"{', '.join(f.value for f in Frequency)}"
         )
 
-    # Add the field using ticker string directly
-    # Description comes from storable fields registry
     field = db.add_field(
         ticker=ticker,
         field_name=field_name,
         frequency=freq_enum
     )
 
-    # Create provider config with Bloomberg connection details
     config_dict = {
         "ticker": bloomberg_ticker,
         "field": bloomberg_field,
