@@ -780,13 +780,22 @@ class BloombergFetcher:
         request.set("startDate", start_date.strftime("%Y%m%d"))
         request.set("endDate", end_date.strftime("%Y%m%d"))
 
-        # Apply overrides if any
-        if overrides:
-            override_element = request.getElement("overrides")
-            for key, value in overrides.items():
-                override = override_element.appendElement()
-                override.setElement("fieldId", key)
-                override.setElement("value", str(value))
+        # Apply overrides if any (must be a non-empty dict with string keys)
+        if overrides and isinstance(overrides, dict):
+            # Filter out any non-string keys or empty values
+            valid_overrides = {
+                k: v for k, v in overrides.items()
+                if isinstance(k, str) and k and v is not None
+            }
+            if valid_overrides:
+                self._log_verbose(f"  Applying {len(valid_overrides)} override(s): {valid_overrides}")
+                override_element = request.getElement("overrides")
+                for key, value in valid_overrides.items():
+                    override = override_element.appendElement()
+                    override.setElement("fieldId", key)
+                    override.setElement("value", str(value))
+            elif overrides:
+                self._log_verbose(f"  WARNING: overrides dict was not empty but had no valid entries: {overrides}")
 
         self._log_verbose(f"Sending request to Bloomberg...")
         self._session.sendRequest(request)
@@ -875,13 +884,18 @@ class BloombergFetcher:
         for field in fields:
             request.getElement("fields").appendValue(field)
 
-        # Apply overrides if any
-        if overrides:
-            override_element = request.getElement("overrides")
-            for key, value in overrides.items():
-                override = override_element.appendElement()
-                override.setElement("fieldId", key)
-                override.setElement("value", str(value))
+        # Apply overrides if any (must be a non-empty dict with string keys)
+        if overrides and isinstance(overrides, dict):
+            valid_overrides = {
+                k: v for k, v in overrides.items()
+                if isinstance(k, str) and k and v is not None
+            }
+            if valid_overrides:
+                override_element = request.getElement("overrides")
+                for key, value in valid_overrides.items():
+                    override = override_element.appendElement()
+                    override.setElement("fieldId", key)
+                    override.setElement("value", str(value))
 
         self._session.sendRequest(request)
 
