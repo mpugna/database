@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Protocol, Any
 from dataclasses import dataclass
 
-from financial_ts_db import (
+from .financial_ts_db import (
     FinancialTimeSeriesDB,
     DataProvider,
     ProviderConfig,
