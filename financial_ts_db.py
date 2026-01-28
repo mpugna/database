@@ -1503,7 +1503,11 @@ class FinancialTimeSeriesDB:
             conn.commit()
 
             provider_config = self._get_provider_config_by_id(cursor.lastrowid)
-            logger.info(f"Added provider config: {provider.value} for {ticker}.{field_name}")
+            logger.info(
+                f"Added provider config: {provider.value} for {ticker}.{field_name} "
+                f"({frequency if isinstance(frequency, str) else frequency.value}), "
+                f"priority={priority}, active={is_active}"
+            )
             return provider_config
 
     def _get_provider_config_by_id(self, config_id: int) -> Optional[ProviderConfig]:
@@ -1607,7 +1611,14 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-        logger.info(f"Updated provider config: {provider.value} for {ticker}.{field_name}")
+        updated_fields = list(kwargs.keys())
+        if pct_change is not None:
+            updated_fields.append('pct_change')
+        logger.info(
+            f"Updated provider config: {provider.value} for {ticker}.{field_name} "
+            f"({frequency if isinstance(frequency, str) else frequency.value}), "
+            f"updated fields: {updated_fields}"
+        )
         return self._get_provider_config_by_id(config_id)
 
     def delete_provider_config(
@@ -1628,7 +1639,10 @@ class FinancialTimeSeriesDB:
             conn.commit()
 
             if cursor.rowcount > 0:
-                logger.info(f"Deleted provider config: {provider.value} for {ticker}.{field_name}")
+                logger.info(
+                    f"Deleted provider config: {provider.value} for {ticker}.{field_name} "
+                    f"({frequency if isinstance(frequency, str) else frequency.value})"
+                )
                 return True
             return False
 
