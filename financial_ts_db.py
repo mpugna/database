@@ -563,11 +563,19 @@ class FinancialTimeSeriesDB:
             description: Description of the field
             metadata: Additional metadata for the field (e.g., {"unit": "USD"})
 
+        Raises:
+            ValueError: If the field already exists. Use update_storable_field() to modify.
+
         Example:
             db.add_storable_field("dividend yield", "Annual dividend yield", {"unit": "percent"})
             db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
         """
         normalized = field_name.lower()
+        if normalized in self._storable_fields:
+            raise ValueError(
+                f"Storable field '{normalized}' already exists. "
+                f"Use update_storable_field() to modify it."
+            )
         field_def = StorableFieldDef(
             name=normalized,
             description=description,
@@ -575,6 +583,42 @@ class FinancialTimeSeriesDB:
         )
         self._persist_storable_field(field_def)
         logger.info(f"Added storable field: {normalized}")
+
+    def update_storable_field(
+        self,
+        field_name: str,
+        description: Optional[str] = None,
+        metadata: Optional[dict] = None
+    ) -> None:
+        """
+        Update an existing storable field definition.
+
+        Args:
+            field_name: The field name to update (case-insensitive)
+            description: New description (if None, keeps existing)
+            metadata: New metadata (if None, keeps existing)
+
+        Raises:
+            ValueError: If the field does not exist. Use add_storable_field() to create.
+
+        Example:
+            db.update_storable_field("price", description="Updated description")
+            db.update_storable_field("price", metadata={"unit": "USD", "precision": 2})
+        """
+        normalized = field_name.lower()
+        if normalized not in self._storable_fields:
+            raise ValueError(
+                f"Storable field '{normalized}' does not exist. "
+                f"Use add_storable_field() to create it."
+            )
+        existing = self._storable_fields[normalized]
+        updated_def = StorableFieldDef(
+            name=normalized,
+            description=description if description is not None else existing.description,
+            metadata=metadata if metadata is not None else existing.metadata
+        )
+        self._persist_storable_field(updated_def)
+        logger.info(f"Updated storable field: {normalized}")
 
     def remove_storable_field(self, field_name: str) -> bool:
         """
