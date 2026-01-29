@@ -475,8 +475,8 @@ def add_field(
     ticker: str,
     field_name: str,
     frequency: Frequency | str,
-    description: str = "",
-    unit: str = ""
+    unit: str = "",
+    metadata: Optional[dict] = None
 ) -> InstrumentField
 ```
 
@@ -495,6 +495,14 @@ eps_field = db.add_field(
     ticker="AAPL",
     field_name="eps",
     frequency="quarterly"
+)
+
+# Add field with metadata (for filtering with get_fields_by_metadata)
+vol_field = db.add_field(
+    ticker="AAPL",
+    field_name="vol_25d_call",
+    frequency="daily",
+    metadata={"type": "volatility", "delta": 25, "option_type": "call"}
 )
 ```
 
@@ -594,6 +602,59 @@ for f in fields:
 #   price (weekly)
 #   eps (quarterly)
 #   total_return (daily) -> SPX.price
+```
+
+### get_fields_by_metadata
+
+Get fields of an instrument that match specific metadata criteria.
+
+```python
+def get_fields_by_metadata(
+    self,
+    ticker: str,
+    metadata_filter: dict,
+    frequency: Optional[Frequency | str] = None,
+    include_aliases: bool = True
+) -> list[dict]
+```
+
+**Example:**
+```python
+# Add fields with metadata for a volatility surface
+db.add_field("AAPL", "vol_25d_call", "daily",
+             metadata={"type": "volatility", "delta": 25, "option_type": "call"})
+db.add_field("AAPL", "vol_50d_atm", "daily",
+             metadata={"type": "volatility", "delta": 50, "option_type": "atm"})
+db.add_field("AAPL", "vol_25d_put", "daily",
+             metadata={"type": "volatility", "delta": 25, "option_type": "put"})
+
+# Find all volatility fields
+vol_fields = db.get_fields_by_metadata("AAPL", {"type": "volatility"})
+print(f"Found {len(vol_fields)} volatility fields")
+
+# Find 25 delta call fields
+call_fields = db.get_fields_by_metadata(
+    "AAPL",
+    {"delta": 25, "option_type": "call"}
+)
+
+# Filter by frequency as well
+daily_vol = db.get_fields_by_metadata(
+    "AAPL",
+    {"type": "volatility"},
+    frequency="daily"
+)
+
+# Returned dict structure includes metadata:
+# {
+#     "field_name": "vol_25d_call",
+#     "frequency": "daily",
+#     "description": "...",
+#     "unit": "...",
+#     "metadata": {"type": "volatility", "delta": 25, "option_type": "call"},
+#     "is_alias": False,
+#     "alias_target": None
+# }
 ```
 
 ### resolve_alias
