@@ -1788,57 +1788,71 @@ class FinancialTimeSeriesDB:
     def get_time_series(
         self,
         ticker: str,
-        field_name: str,
+        field_name: Union[str, list[str]],
         frequency: Union[str, Frequency],
         start_date: Optional[datetime | date] = None,
         end_date: Optional[datetime | date] = None,
         resolve_alias: bool = True
-    ) -> pd.Series:
+    ) -> pd.DataFrame:
         """
-        Get time series data for a field.
+        Get time series data for one or more fields.
 
         Args:
             ticker: Ticker of the instrument
-            field_name: Name of the field
+            field_name: Name of the field(s) - can be a single string or list of strings
             frequency: Data frequency
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
             resolve_alias: If True and field is an alias, get data from target field
 
         Returns:
-            pandas Series indexed by timestamp with the field name as series name
+            pandas DataFrame indexed by timestamp with field names as columns
         """
         freq = _to_frequency(frequency)
-        field_id = self._get_field_id(ticker, field_name, freq)
 
-        # Resolve alias if needed
-        actual_field_id = field_id
-        if resolve_alias:
-            resolved_field = self.resolve_alias(ticker, field_name, freq)
-            actual_field_id = resolved_field.id
+        # Normalize field_name to a list
+        field_names = [field_name] if isinstance(field_name, str) else field_name
 
-        query = "SELECT timestamp, value FROM time_series_data WHERE field_id = ?"
-        params: list[Any] = [actual_field_id]
+        # Collect series for each field
+        series_dict = {}
+        for fname in field_names:
+            field_id = self._get_field_id(ticker, fname, freq)
 
-        if start_date:
-            if isinstance(start_date, date) and not isinstance(start_date, datetime):
-                start_date = datetime.combine(start_date, datetime.min.time())
-            query += " AND timestamp >= ?"
-            params.append(start_date)
+            # Resolve alias if needed
+            actual_field_id = field_id
+            if resolve_alias:
+                resolved_field = self.resolve_alias(ticker, fname, freq)
+                actual_field_id = resolved_field.id
 
-        if end_date:
-            if isinstance(end_date, date) and not isinstance(end_date, datetime):
-                end_date = datetime.combine(end_date, datetime.max.time())
-            query += " AND timestamp <= ?"
-            params.append(end_date)
+            query = "SELECT timestamp, value FROM time_series_data WHERE field_id = ?"
+            params: list[Any] = [actual_field_id]
 
-        query += " ORDER BY timestamp"
+            if start_date:
+                sd = start_date
+                if isinstance(sd, date) and not isinstance(sd, datetime):
+                    sd = datetime.combine(sd, datetime.min.time())
+                query += " AND timestamp >= ?"
+                params.append(sd)
 
-        with self._get_connection() as conn:
-            rows = conn.execute(query, params).fetchall()
-            timestamps = [row['timestamp'] for row in rows]
-            values = [row['value'] for row in rows]
-            return pd.Series(values, index=pd.DatetimeIndex(timestamps), name=field_name)
+            if end_date:
+                ed = end_date
+                if isinstance(ed, date) and not isinstance(ed, datetime):
+                    ed = datetime.combine(ed, datetime.max.time())
+                query += " AND timestamp <= ?"
+                params.append(ed)
+
+            query += " ORDER BY timestamp"
+
+            with self._get_connection() as conn:
+                rows = conn.execute(query, params).fetchall()
+                timestamps = [row['timestamp'] for row in rows]
+                values = [row['value'] for row in rows]
+                series_dict[fname] = pd.Series(values, index=pd.DatetimeIndex(timestamps))
+
+        # Combine all series into a DataFrame
+        df = pd.DataFrame(series_dict)
+        df.index.name = 'timestamp'
+        return df
 
     def get_latest_value(
         self,
