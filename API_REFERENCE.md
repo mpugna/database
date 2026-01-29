@@ -237,40 +237,29 @@ print(field_def.description)  # "Last traded price"
 
 ### add_storable_field
 
-Add a new allowed field name. Raises `ValueError` if field already exists.
+Add or update a storable field definition. Raises `ValueError` if field already exists and `overwrite=False`.
 
 ```python
 def add_storable_field(
     self,
     field_name: str,
     description: str = "",
-    metadata: Optional[dict] = None
+    metadata: Optional[dict] = None,
+    overwrite: bool = False
 ) -> None
 ```
 
 **Example:**
 ```python
+# Add new fields
 db.add_storable_field("volume", "Trading volume", {"unit": "shares"})
 db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
-```
 
-### update_storable_field
+# Update existing field (overwrite=True)
+db.add_storable_field("price", "Updated description", {"unit": "USD"}, overwrite=True)
 
-Update an existing storable field. Raises `ValueError` if field doesn't exist.
-
-```python
-def update_storable_field(
-    self,
-    field_name: str,
-    description: Optional[str] = None,
-    metadata: Optional[dict] = None
-) -> None
-```
-
-**Example:**
-```python
-db.update_storable_field("price", description="Updated description")
-db.update_storable_field("price", metadata={"unit": "USD", "precision": 2})
+# This will raise ValueError (field exists, overwrite=False)
+db.add_storable_field("price", "New description")  # Error!
 ```
 
 ### remove_storable_field
