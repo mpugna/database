@@ -563,11 +563,19 @@ class FinancialTimeSeriesDB:
             description: Description of the field
             metadata: Additional metadata for the field (e.g., {"unit": "USD"})
 
+        Raises:
+            ValueError: If the field already exists. Use update_storable_field() to modify.
+
         Example:
             db.add_storable_field("dividend yield", "Annual dividend yield", {"unit": "percent"})
             db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
         """
         normalized = field_name.lower()
+        if normalized in self._storable_fields:
+            raise ValueError(
+                f"Storable field '{normalized}' already exists. "
+                f"Use update_storable_field() to modify it."
+            )
         field_def = StorableFieldDef(
             name=normalized,
             description=description,
@@ -575,6 +583,42 @@ class FinancialTimeSeriesDB:
         )
         self._persist_storable_field(field_def)
         logger.info(f"Added storable field: {normalized}")
+
+    def update_storable_field(
+        self,
+        field_name: str,
+        description: Optional[str] = None,
+        metadata: Optional[dict] = None
+    ) -> None:
+        """
+        Update an existing storable field definition.
+
+        Args:
+            field_name: The field name to update (case-insensitive)
+            description: New description (if None, keeps existing)
+            metadata: New metadata (if None, keeps existing)
+
+        Raises:
+            ValueError: If the field does not exist. Use add_storable_field() to create.
+
+        Example:
+            db.update_storable_field("price", description="Updated description")
+            db.update_storable_field("price", metadata={"unit": "USD", "precision": 2})
+        """
+        normalized = field_name.lower()
+        if normalized not in self._storable_fields:
+            raise ValueError(
+                f"Storable field '{normalized}' does not exist. "
+                f"Use add_storable_field() to create it."
+            )
+        existing = self._storable_fields[normalized]
+        updated_def = StorableFieldDef(
+            name=normalized,
+            description=description if description is not None else existing.description,
+            metadata=metadata if metadata is not None else existing.metadata
+        )
+        self._persist_storable_field(updated_def)
+        logger.info(f"Updated storable field: {normalized}")
 
     def remove_storable_field(self, field_name: str) -> bool:
         """
@@ -1226,6 +1270,46 @@ class FinancialTimeSeriesDB:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_field(row, conn) for row in rows]
 
+    def get_instrument_fields(
+        self,
+        ticker: str,
+        include_aliases: bool = True
+    ) -> list[dict]:
+        """
+        Get a summary of all fields for an instrument with their frequencies.
+
+        Args:
+            ticker: Ticker of the instrument
+            include_aliases: Whether to include alias fields
+
+        Returns:
+            List of dicts with field information:
+            [
+                {"field_name": "price", "frequency": "daily", "is_alias": False, ...},
+                {"field_name": "price", "frequency": "weekly", "is_alias": False, ...},
+                ...
+            ]
+
+        Example:
+            fields = db.get_instrument_fields("AAPL")
+            for f in fields:
+                print(f"{f['field_name']} ({f['frequency']})")
+        """
+        fields = self.list_fields(ticker=ticker, include_aliases=include_aliases)
+
+        result = []
+        for f in fields:
+            result.append({
+                "field_name": f.field_name,
+                "frequency": f.frequency.value,
+                "description": f.description,
+                "unit": f.unit,
+                "is_alias": f.alias_ticker is not None,
+                "alias_target": f"{f.alias_ticker}.{f.alias_field_name}" if f.alias_ticker else None
+            })
+
+        return result
+
     def get_aliases_for_field(
         self,
         ticker: str,
@@ -1503,7 +1587,11 @@ class FinancialTimeSeriesDB:
             conn.commit()
 
             provider_config = self._get_provider_config_by_id(cursor.lastrowid)
-            logger.info(f"Added provider config: {provider.value} for {ticker}.{field_name}")
+            logger.info(
+                f"Added provider config: {provider.value} for {ticker}.{field_name} "
+                f"({frequency if isinstance(frequency, str) else frequency.value}), "
+                f"priority={priority}, active={is_active}"
+            )
             return provider_config
 
     def _get_provider_config_by_id(self, config_id: int) -> Optional[ProviderConfig]:
@@ -1607,7 +1695,14 @@ class FinancialTimeSeriesDB:
             )
             conn.commit()
 
-        logger.info(f"Updated provider config: {provider.value} for {ticker}.{field_name}")
+        updated_fields = list(kwargs.keys())
+        if pct_change is not None:
+            updated_fields.append('pct_change')
+        logger.info(
+            f"Updated provider config: {provider.value} for {ticker}.{field_name} "
+            f"({frequency if isinstance(frequency, str) else frequency.value}), "
+            f"updated fields: {updated_fields}"
+        )
         return self._get_provider_config_by_id(config_id)
 
     def delete_provider_config(
@@ -1628,7 +1723,10 @@ class FinancialTimeSeriesDB:
             conn.commit()
 
             if cursor.rowcount > 0:
-                logger.info(f"Deleted provider config: {provider.value} for {ticker}.{field_name}")
+                logger.info(
+                    f"Deleted provider config: {provider.value} for {ticker}.{field_name} "
+                    f"({frequency if isinstance(frequency, str) else frequency.value})"
+                )
                 return True
             return False
 
@@ -1730,57 +1828,143 @@ class FinancialTimeSeriesDB:
     def get_time_series(
         self,
         ticker: str,
-        field_name: str,
+        field_name: Union[str, list[str]],
         frequency: Union[str, Frequency],
         start_date: Optional[datetime | date] = None,
         end_date: Optional[datetime | date] = None,
         resolve_alias: bool = True
-    ) -> pd.Series:
+    ) -> pd.DataFrame:
         """
-        Get time series data for a field.
+        Get time series data for one or more fields.
 
         Args:
             ticker: Ticker of the instrument
-            field_name: Name of the field
+            field_name: Name of the field(s) - can be a single string or list of strings
             frequency: Data frequency
             start_date: Start of date range (inclusive)
             end_date: End of date range (inclusive)
             resolve_alias: If True and field is an alias, get data from target field
 
         Returns:
-            pandas Series indexed by timestamp with the field name as series name
+            pandas DataFrame indexed by timestamp with field names as columns
         """
         freq = _to_frequency(frequency)
-        field_id = self._get_field_id(ticker, field_name, freq)
 
-        # Resolve alias if needed
-        actual_field_id = field_id
-        if resolve_alias:
-            resolved_field = self.resolve_alias(ticker, field_name, freq)
-            actual_field_id = resolved_field.id
+        # Normalize field_name to a list
+        field_names = [field_name] if isinstance(field_name, str) else field_name
 
-        query = "SELECT timestamp, value FROM time_series_data WHERE field_id = ?"
-        params: list[Any] = [actual_field_id]
-
+        # Convert dates once (outside any loop)
+        sd = None
         if start_date:
-            if isinstance(start_date, date) and not isinstance(start_date, datetime):
-                start_date = datetime.combine(start_date, datetime.min.time())
-            query += " AND timestamp >= ?"
-            params.append(start_date)
+            sd = start_date
+            if isinstance(sd, date) and not isinstance(sd, datetime):
+                sd = datetime.combine(sd, datetime.min.time())
 
+        ed = None
         if end_date:
-            if isinstance(end_date, date) and not isinstance(end_date, datetime):
-                end_date = datetime.combine(end_date, datetime.max.time())
+            ed = end_date
+            if isinstance(ed, date) and not isinstance(ed, datetime):
+                ed = datetime.combine(ed, datetime.max.time())
+
+        # Pre-resolve all field IDs upfront (maps field_id -> field_name)
+        field_id_to_name: dict[int, str] = {}
+        for fname in field_names:
+            field_id = self._get_field_id(ticker, fname, freq)
+            actual_field_id = field_id
+            if resolve_alias:
+                resolved_field = self.resolve_alias(ticker, fname, freq)
+                actual_field_id = resolved_field.id
+            field_id_to_name[actual_field_id] = fname
+
+        if not field_id_to_name:
+            return pd.DataFrame()
+
+        # Build single query for all fields using IN clause
+        field_ids = list(field_id_to_name.keys())
+        placeholders = ",".join("?" * len(field_ids))
+        query = f"SELECT field_id, timestamp, value FROM time_series_data WHERE field_id IN ({placeholders})"
+        params: list[Any] = field_ids
+
+        if sd:
+            query += " AND timestamp >= ?"
+            params.append(sd)
+
+        if ed:
             query += " AND timestamp <= ?"
-            params.append(end_date)
+            params.append(ed)
 
         query += " ORDER BY timestamp"
 
+        # Execute single query and pivot results
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
-            timestamps = [row['timestamp'] for row in rows]
-            values = [row['value'] for row in rows]
-            return pd.Series(values, index=pd.DatetimeIndex(timestamps), name=field_name)
+
+        # Group data by field_name
+        data_by_field: dict[str, tuple[list, list]] = {fname: ([], []) for fname in field_names}
+        for row in rows:
+            fname = field_id_to_name[row['field_id']]
+            data_by_field[fname][0].append(row['timestamp'])
+            data_by_field[fname][1].append(row['value'])
+
+        # Build series dict
+        series_dict = {}
+        for fname, (timestamps, values) in data_by_field.items():
+            series_dict[fname] = pd.Series(values, index=pd.DatetimeIndex(timestamps))
+
+        # Combine all series into a DataFrame
+        df = pd.DataFrame(series_dict)
+        df.index.name = 'timestamp'
+        return df
+
+    def get_all_time_series(
+        self,
+        ticker: str,
+        frequency: Union[str, Frequency],
+        start_date: Optional[datetime | date] = None,
+        end_date: Optional[datetime | date] = None,
+        resolve_alias: bool = True,
+        include_aliases: bool = True
+    ) -> pd.DataFrame:
+        """
+        Get time series data for all fields of an instrument at a given frequency.
+
+        Args:
+            ticker: Ticker of the instrument
+            frequency: Data frequency
+            start_date: Start of date range (inclusive)
+            end_date: End of date range (inclusive)
+            resolve_alias: If True and field is an alias, get data from target field
+            include_aliases: Whether to include alias fields
+
+        Returns:
+            pandas DataFrame indexed by timestamp with all field names as columns
+
+        Example:
+            # Get all daily fields for AAPL
+            df = db.get_all_time_series("AAPL", "daily")
+            # Returns DataFrame with columns like 'price', 'volume', etc.
+        """
+        freq = _to_frequency(frequency)
+
+        # Get all fields for this instrument at the given frequency
+        fields = self.list_fields(ticker=ticker, frequency=freq, include_aliases=include_aliases)
+
+        if not fields:
+            # Return empty DataFrame if no fields found
+            return pd.DataFrame()
+
+        # Extract field names
+        field_names = [f.field_name for f in fields]
+
+        # Use get_time_series to retrieve all fields
+        return self.get_time_series(
+            ticker=ticker,
+            field_name=field_names,
+            frequency=freq,
+            start_date=start_date,
+            end_date=end_date,
+            resolve_alias=resolve_alias
+        )
 
     def get_latest_value(
         self,

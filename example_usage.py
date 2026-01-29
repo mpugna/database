@@ -275,16 +275,16 @@ def main():
     # Get time series with date range
     start = datetime(2024, 1, 4)
     end = datetime(2024, 1, 8)
-    aapl_series = db.get_time_series("AAPL", "price", Frequency.DAILY, start_date=start, end_date=end)
+    aapl_df = db.get_time_series("AAPL", "price", Frequency.DAILY, start_date=start, end_date=end)
     print(f"  AAPL prices from {start.date()} to {end.date()}:")
-    for timestamp, value in aapl_series.items():
-        print(f"    {timestamp.date()}: ${value:.2f}")
+    for timestamp, row in aapl_df.iterrows():
+        print(f"    {timestamp.date()}: ${row['price']:.2f}")
 
     # Get data through alias (SPX.TOTAL_RETURN -> SPXTR.PRICE)
     print(f"\n  Accessing SPX.TOTAL_RETURN (alias for SPXTR.PRICE):")
     tr_data = db.get_time_series("SPX", "total_return", Frequency.DAILY, resolve_alias=True)
-    for timestamp, value in list(tr_data.items())[:3]:  # Show first 3
-        print(f"    {timestamp.date()}: {value:.2f}")
+    for timestamp, row in list(tr_data.iterrows())[:3]:  # Show first 3
+        print(f"    {timestamp.date()}: {row['total_return']:.2f}")
     print(f"    ... ({len(tr_data)} total points)")
 
     # =========================================================================
@@ -607,7 +607,7 @@ def bloomberg_example():
     print("\n📈 Querying stored Bloomberg data...")
 
     # Get time series from database
-    aapl_series = db.get_time_series(
+    aapl_df = db.get_time_series(
         ticker="AAPL",
         field_name="price",
         frequency="daily",
@@ -615,10 +615,10 @@ def bloomberg_example():
         end_date=date(2024, 1, 10)
     )
 
-    if len(aapl_series) > 0:
+    if len(aapl_df) > 0:
         print(f"  AAPL prices (first 5):")
-        for timestamp, value in list(aapl_series.items())[:5]:
-            print(f"    {timestamp.date()}: ${value:.2f}")
+        for timestamp, row in list(aapl_df.iterrows())[:5]:
+            print(f"    {timestamp.date()}: ${row['price']:.2f}")
     else:
         print("  No data stored (Bloomberg connection may have failed)")
 
@@ -752,10 +752,15 @@ with BloombergFetcher(db) as fetcher:
 # Query: Data is stored and retrieved using string identifiers
 # =============================================================================
 
-# Returns a pandas Series indexed by timestamp, named after the field
-series = db.get_time_series("AAPL", "price", "daily")
-for timestamp, value in list(series.items())[-5:]:
-    print(f"{timestamp.date()}: ${value:.2f}")
+# Returns a pandas DataFrame indexed by timestamp, with field names as columns
+# Single field returns DataFrame with one column
+df = db.get_time_series("AAPL", "price", "daily")
+for timestamp, row in list(df.iterrows())[-5:]:
+    print(f"{timestamp.date()}: ${row['price']:.2f}")
+
+# Multiple fields can be retrieved at once
+df = db.get_time_series("AAPL", ["price", "volume"], "daily")
+print(df.head())  # Shows DataFrame with 'price' and 'volume' columns
 
 # You can also check what config is stored
 configs = db.get_provider_configs("AAPL", "price", "daily")
