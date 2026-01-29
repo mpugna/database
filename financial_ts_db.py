@@ -1270,6 +1270,46 @@ class FinancialTimeSeriesDB:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_field(row, conn) for row in rows]
 
+    def get_instrument_fields(
+        self,
+        ticker: str,
+        include_aliases: bool = True
+    ) -> list[dict]:
+        """
+        Get a summary of all fields for an instrument with their frequencies.
+
+        Args:
+            ticker: Ticker of the instrument
+            include_aliases: Whether to include alias fields
+
+        Returns:
+            List of dicts with field information:
+            [
+                {"field_name": "price", "frequency": "daily", "is_alias": False, ...},
+                {"field_name": "price", "frequency": "weekly", "is_alias": False, ...},
+                ...
+            ]
+
+        Example:
+            fields = db.get_instrument_fields("AAPL")
+            for f in fields:
+                print(f"{f['field_name']} ({f['frequency']})")
+        """
+        fields = self.list_fields(ticker=ticker, include_aliases=include_aliases)
+
+        result = []
+        for f in fields:
+            result.append({
+                "field_name": f.field_name,
+                "frequency": f.frequency.value,
+                "description": f.description,
+                "unit": f.unit,
+                "is_alias": f.alias_ticker is not None,
+                "alias_target": f"{f.alias_ticker}.{f.alias_field_name}" if f.alias_ticker else None
+            })
+
+        return result
+
     def get_aliases_for_field(
         self,
         ticker: str,
