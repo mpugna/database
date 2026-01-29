@@ -15,7 +15,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Protocol, Any
 from dataclasses import dataclass
 
-from financial_ts_db import (
+from .financial_ts_db import (
     FinancialTimeSeriesDB,
     DataProvider,
     ProviderConfig,
@@ -425,7 +425,7 @@ class DataFetcher:
         Raises:
             ValueError: If no provider config found or no start_date when DB is empty
         """
-        end_date = end_date or date.today()
+        end_date = end_date or (date.today() - timedelta(days=1))
 
         self._log(f"--- fetch_historical_data ---")
         self._log(f"  {ticker}.{field_name} ({frequency})")
