@@ -551,10 +551,11 @@ class FinancialTimeSeriesDB:
         self,
         field_name: str,
         description: str = "",
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
+        overwrite: bool = False
     ) -> None:
         """
-        Add a new field definition to the list of allowed storable fields.
+        Add a field definition to the list of allowed storable fields.
 
         The field definition is persisted in the database.
 
@@ -562,63 +563,38 @@ class FinancialTimeSeriesDB:
             field_name: The field name to allow (case-insensitive)
             description: Description of the field
             metadata: Additional metadata for the field (e.g., {"unit": "USD"})
+            overwrite: If True, overwrites existing field. If False, raises error if exists.
 
         Raises:
-            ValueError: If the field already exists. Use update_storable_field() to modify.
+            ValueError: If the field already exists and overwrite=False.
 
         Example:
             db.add_storable_field("dividend yield", "Annual dividend yield", {"unit": "percent"})
             db.add_storable_field("eps", "Earnings per share", {"unit": "currency"})
+
+            # Update existing field
+            db.add_storable_field("price", "Updated description", overwrite=True)
         """
         normalized = field_name.lower()
-        if normalized in self._storable_fields:
+        exists = normalized in self._storable_fields
+
+        if exists and not overwrite:
             raise ValueError(
                 f"Storable field '{normalized}' already exists. "
-                f"Use update_storable_field() to modify it."
+                f"Use overwrite=True to update it."
             )
+
         field_def = StorableFieldDef(
             name=normalized,
             description=description,
             metadata=metadata or {}
         )
         self._persist_storable_field(field_def)
-        logger.info(f"Added storable field: {normalized}")
 
-    def update_storable_field(
-        self,
-        field_name: str,
-        description: Optional[str] = None,
-        metadata: Optional[dict] = None
-    ) -> None:
-        """
-        Update an existing storable field definition.
-
-        Args:
-            field_name: The field name to update (case-insensitive)
-            description: New description (if None, keeps existing)
-            metadata: New metadata (if None, keeps existing)
-
-        Raises:
-            ValueError: If the field does not exist. Use add_storable_field() to create.
-
-        Example:
-            db.update_storable_field("price", description="Updated description")
-            db.update_storable_field("price", metadata={"unit": "USD", "precision": 2})
-        """
-        normalized = field_name.lower()
-        if normalized not in self._storable_fields:
-            raise ValueError(
-                f"Storable field '{normalized}' does not exist. "
-                f"Use add_storable_field() to create it."
-            )
-        existing = self._storable_fields[normalized]
-        updated_def = StorableFieldDef(
-            name=normalized,
-            description=description if description is not None else existing.description,
-            metadata=metadata if metadata is not None else existing.metadata
-        )
-        self._persist_storable_field(updated_def)
-        logger.info(f"Updated storable field: {normalized}")
+        if exists:
+            logger.info(f"Updated storable field: {normalized}")
+        else:
+            logger.info(f"Added storable field: {normalized}")
 
     def remove_storable_field(self, field_name: str) -> bool:
         """
