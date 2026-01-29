@@ -1086,21 +1086,22 @@ class FinancialTimeSeriesDB:
         unit: str = "",
         alias_ticker: Optional[str] = None,
         alias_field_name: Optional[str] = None,
-        alias_frequency: Optional[Union[str, Frequency]] = None,
-        metadata: Optional[dict] = None
+        alias_frequency: Optional[Union[str, Frequency]] = None
     ) -> InstrumentField:
         """
-        Add a new field to an instrument.
+        Associate a storable field with an instrument at a specific frequency.
+
+        The field's description and metadata are inherited from the storable field
+        registry. Use add_storable_field() to define field properties.
 
         Args:
             ticker: Ticker symbol of the parent instrument (e.g., "AAPL")
             field_name: Name of the field (must be in storable fields registry)
             frequency: Data frequency (string like "daily" or Frequency enum)
-            unit: Unit of measurement
+            unit: Unit of measurement (overrides storable field's unit if provided)
             alias_ticker: If this is an alias, the ticker of the target instrument
             alias_field_name: If this is an alias, the target field name
             alias_frequency: If this is an alias, the target frequency (defaults to same)
-            metadata: Additional metadata
 
         Returns:
             The created InstrumentField object
@@ -1114,16 +1115,10 @@ class FinancialTimeSeriesDB:
         # Validate field name
         self.validate_field_name(field_name)
 
-        # Get description and default metadata from storable field definition
+        # Get description and metadata from storable field definition
         storable_field = self.get_storable_field(field_name)
         description = storable_field.description if storable_field else ""
-
-        # Merge metadata
-        merged_metadata = {}
-        if storable_field and storable_field.metadata:
-            merged_metadata.update(storable_field.metadata)
-        if metadata:
-            merged_metadata.update(metadata)
+        field_metadata = storable_field.metadata if storable_field else {}
 
         # Use unit from storable field metadata if not explicitly provided
         if not unit and storable_field and storable_field.metadata:
@@ -1151,7 +1146,7 @@ class FinancialTimeSeriesDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (instrument_id, field_name, freq.value, description, unit,
-                 alias_instrument_id, alias_field_id, json.dumps(merged_metadata))
+                 alias_instrument_id, alias_field_id, json.dumps(field_metadata))
             )
             conn.commit()
 
@@ -1320,13 +1315,14 @@ class FinancialTimeSeriesDB:
         """
         Get fields of an instrument that match specific metadata criteria.
 
-        Returns fields where the metadata contains all the specified key-value pairs.
-        The match is exact for each key-value pair in the filter.
+        Returns fields where the storable field's metadata contains all the
+        specified key-value pairs. The match is exact for each key-value pair.
 
         Args:
             ticker: Ticker of the instrument
             metadata_filter: Dict of metadata key-value pairs to match.
                              All pairs must match for a field to be included.
+                             Metadata is looked up from the storable field registry.
             frequency: Optional frequency filter
             include_aliases: Whether to include alias fields
 
@@ -1334,18 +1330,21 @@ class FinancialTimeSeriesDB:
             List of dicts with field information for matching fields
 
         Example:
-            # Find all volatility fields with delta=50
-            fields = db.get_fields_by_metadata(
-                "AAPL",
-                {"type": "volatility", "delta": 50}
-            )
+            # First define storable fields with metadata
+            db.add_storable_field("vol_25d_call", "25 delta call vol",
+                                  {"type": "volatility", "delta": 25, "option_type": "call"})
+            db.add_storable_field("vol_50d_atm", "ATM vol",
+                                  {"type": "volatility", "delta": 50, "option_type": "atm"})
 
-            # Find all fields with unit="percent" at daily frequency
-            fields = db.get_fields_by_metadata(
-                "AAPL",
-                {"unit": "percent"},
-                frequency="daily"
-            )
+            # Then add fields to instrument
+            db.add_field("AAPL", "vol_25d_call", "daily")
+            db.add_field("AAPL", "vol_50d_atm", "daily")
+
+            # Find all volatility fields
+            fields = db.get_fields_by_metadata("AAPL", {"type": "volatility"})
+
+            # Find 50 delta fields
+            fields = db.get_fields_by_metadata("AAPL", {"delta": 50})
         """
         # Get all fields for the instrument
         fields = self.list_fields(
@@ -1356,10 +1355,14 @@ class FinancialTimeSeriesDB:
 
         result = []
         for f in fields:
+            # Look up metadata from storable field registry (source of truth)
+            storable_field = self.get_storable_field(f.field_name)
+            field_metadata = storable_field.metadata if storable_field else {}
+
             # Check if all metadata filter criteria match
             matches = True
             for key, value in metadata_filter.items():
-                if key not in f.metadata or f.metadata[key] != value:
+                if key not in field_metadata or field_metadata[key] != value:
                     matches = False
                     break
 
@@ -1369,7 +1372,7 @@ class FinancialTimeSeriesDB:
                     "frequency": f.frequency.value,
                     "description": f.description,
                     "unit": f.unit,
-                    "metadata": f.metadata,
+                    "metadata": field_metadata,
                     "is_alias": f.alias_ticker is not None,
                     "alias_target": f"{f.alias_ticker}.{f.alias_field_name}" if f.alias_ticker else None
                 })
