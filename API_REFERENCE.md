@@ -467,7 +467,10 @@ impact = db.delete_instrument("AAPL")
 
 ### add_field
 
-Add a field to an instrument.
+Associate a storable field with an instrument at a specific frequency.
+
+The field's description and metadata are inherited from the storable field registry.
+Use `add_storable_field()` to define field properties.
 
 ```python
 def add_field(
@@ -475,14 +478,13 @@ def add_field(
     ticker: str,
     field_name: str,
     frequency: Frequency | str,
-    unit: str = "",
-    metadata: Optional[dict] = None
+    unit: str = ""
 ) -> InstrumentField
 ```
 
 **Example:**
 ```python
-# Add daily price field
+# Add daily price field (inherits description/metadata from storable field)
 price_field = db.add_field(
     ticker="AAPL",
     field_name="price",
@@ -497,13 +499,14 @@ eps_field = db.add_field(
     frequency="quarterly"
 )
 
-# Add field with metadata (for filtering with get_fields_by_metadata)
-vol_field = db.add_field(
-    ticker="AAPL",
-    field_name="vol_25d_call",
-    frequency="daily",
-    metadata={"type": "volatility", "delta": 25, "option_type": "call"}
+# For custom metadata, first define the storable field
+db.add_storable_field(
+    "vol_25d_call",
+    "25 delta call volatility",
+    {"type": "volatility", "delta": 25, "option_type": "call"}
 )
+# Then associate it with an instrument
+db.add_field("AAPL", "vol_25d_call", "daily")
 ```
 
 ### add_alias_field
@@ -606,7 +609,7 @@ for f in fields:
 
 ### get_fields_by_metadata
 
-Get fields of an instrument that match specific metadata criteria.
+Get fields of an instrument that match specific metadata criteria from the storable field registry.
 
 ```python
 def get_fields_by_metadata(
@@ -620,13 +623,18 @@ def get_fields_by_metadata(
 
 **Example:**
 ```python
-# Add fields with metadata for a volatility surface
-db.add_field("AAPL", "vol_25d_call", "daily",
-             metadata={"type": "volatility", "delta": 25, "option_type": "call"})
-db.add_field("AAPL", "vol_50d_atm", "daily",
-             metadata={"type": "volatility", "delta": 50, "option_type": "atm"})
-db.add_field("AAPL", "vol_25d_put", "daily",
-             metadata={"type": "volatility", "delta": 25, "option_type": "put"})
+# First, define storable fields with metadata
+db.add_storable_field("vol_25d_call", "25 delta call vol",
+                      {"type": "volatility", "delta": 25, "option_type": "call"})
+db.add_storable_field("vol_50d_atm", "ATM volatility",
+                      {"type": "volatility", "delta": 50, "option_type": "atm"})
+db.add_storable_field("vol_25d_put", "25 delta put vol",
+                      {"type": "volatility", "delta": 25, "option_type": "put"})
+
+# Then associate them with an instrument
+db.add_field("AAPL", "vol_25d_call", "daily")
+db.add_field("AAPL", "vol_50d_atm", "daily")
+db.add_field("AAPL", "vol_25d_put", "daily")
 
 # Find all volatility fields
 vol_fields = db.get_fields_by_metadata("AAPL", {"type": "volatility"})
@@ -645,12 +653,12 @@ daily_vol = db.get_fields_by_metadata(
     frequency="daily"
 )
 
-# Returned dict structure includes metadata:
+# Returned dict structure includes metadata from storable field:
 # {
 #     "field_name": "vol_25d_call",
 #     "frequency": "daily",
-#     "description": "...",
-#     "unit": "...",
+#     "description": "25 delta call vol",
+#     "unit": "",
 #     "metadata": {"type": "volatility", "delta": 25, "option_type": "call"},
 #     "is_alias": False,
 #     "alias_target": None
