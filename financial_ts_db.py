@@ -1853,41 +1853,63 @@ class FinancialTimeSeriesDB:
         # Normalize field_name to a list
         field_names = [field_name] if isinstance(field_name, str) else field_name
 
-        # Collect series for each field
-        series_dict = {}
+        # Convert dates once (outside any loop)
+        sd = None
+        if start_date:
+            sd = start_date
+            if isinstance(sd, date) and not isinstance(sd, datetime):
+                sd = datetime.combine(sd, datetime.min.time())
+
+        ed = None
+        if end_date:
+            ed = end_date
+            if isinstance(ed, date) and not isinstance(ed, datetime):
+                ed = datetime.combine(ed, datetime.max.time())
+
+        # Pre-resolve all field IDs upfront (maps field_id -> field_name)
+        field_id_to_name: dict[int, str] = {}
         for fname in field_names:
             field_id = self._get_field_id(ticker, fname, freq)
-
-            # Resolve alias if needed
             actual_field_id = field_id
             if resolve_alias:
                 resolved_field = self.resolve_alias(ticker, fname, freq)
                 actual_field_id = resolved_field.id
+            field_id_to_name[actual_field_id] = fname
 
-            query = "SELECT timestamp, value FROM time_series_data WHERE field_id = ?"
-            params: list[Any] = [actual_field_id]
+        if not field_id_to_name:
+            return pd.DataFrame()
 
-            if start_date:
-                sd = start_date
-                if isinstance(sd, date) and not isinstance(sd, datetime):
-                    sd = datetime.combine(sd, datetime.min.time())
-                query += " AND timestamp >= ?"
-                params.append(sd)
+        # Build single query for all fields using IN clause
+        field_ids = list(field_id_to_name.keys())
+        placeholders = ",".join("?" * len(field_ids))
+        query = f"SELECT field_id, timestamp, value FROM time_series_data WHERE field_id IN ({placeholders})"
+        params: list[Any] = field_ids
 
-            if end_date:
-                ed = end_date
-                if isinstance(ed, date) and not isinstance(ed, datetime):
-                    ed = datetime.combine(ed, datetime.max.time())
-                query += " AND timestamp <= ?"
-                params.append(ed)
+        if sd:
+            query += " AND timestamp >= ?"
+            params.append(sd)
 
-            query += " ORDER BY timestamp"
+        if ed:
+            query += " AND timestamp <= ?"
+            params.append(ed)
 
-            with self._get_connection() as conn:
-                rows = conn.execute(query, params).fetchall()
-                timestamps = [row['timestamp'] for row in rows]
-                values = [row['value'] for row in rows]
-                series_dict[fname] = pd.Series(values, index=pd.DatetimeIndex(timestamps))
+        query += " ORDER BY timestamp"
+
+        # Execute single query and pivot results
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        # Group data by field_name
+        data_by_field: dict[str, tuple[list, list]] = {fname: ([], []) for fname in field_names}
+        for row in rows:
+            fname = field_id_to_name[row['field_id']]
+            data_by_field[fname][0].append(row['timestamp'])
+            data_by_field[fname][1].append(row['value'])
+
+        # Build series dict
+        series_dict = {}
+        for fname, (timestamps, values) in data_by_field.items():
+            series_dict[fname] = pd.Series(values, index=pd.DatetimeIndex(timestamps))
 
         # Combine all series into a DataFrame
         df = pd.DataFrame(series_dict)
