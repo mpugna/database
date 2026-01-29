@@ -1854,6 +1854,56 @@ class FinancialTimeSeriesDB:
         df.index.name = 'timestamp'
         return df
 
+    def get_all_time_series(
+        self,
+        ticker: str,
+        frequency: Union[str, Frequency],
+        start_date: Optional[datetime | date] = None,
+        end_date: Optional[datetime | date] = None,
+        resolve_alias: bool = True,
+        include_aliases: bool = True
+    ) -> pd.DataFrame:
+        """
+        Get time series data for all fields of an instrument at a given frequency.
+
+        Args:
+            ticker: Ticker of the instrument
+            frequency: Data frequency
+            start_date: Start of date range (inclusive)
+            end_date: End of date range (inclusive)
+            resolve_alias: If True and field is an alias, get data from target field
+            include_aliases: Whether to include alias fields
+
+        Returns:
+            pandas DataFrame indexed by timestamp with all field names as columns
+
+        Example:
+            # Get all daily fields for AAPL
+            df = db.get_all_time_series("AAPL", "daily")
+            # Returns DataFrame with columns like 'price', 'volume', etc.
+        """
+        freq = _to_frequency(frequency)
+
+        # Get all fields for this instrument at the given frequency
+        fields = self.list_fields(ticker=ticker, frequency=freq, include_aliases=include_aliases)
+
+        if not fields:
+            # Return empty DataFrame if no fields found
+            return pd.DataFrame()
+
+        # Extract field names
+        field_names = [f.field_name for f in fields]
+
+        # Use get_time_series to retrieve all fields
+        return self.get_time_series(
+            ticker=ticker,
+            field_name=field_names,
+            frequency=freq,
+            start_date=start_date,
+            end_date=end_date,
+            resolve_alias=resolve_alias
+        )
+
     def get_latest_value(
         self,
         ticker: str,
