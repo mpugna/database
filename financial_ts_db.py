@@ -1310,6 +1310,72 @@ class FinancialTimeSeriesDB:
 
         return result
 
+    def get_fields_by_metadata(
+        self,
+        ticker: str,
+        metadata_filter: dict,
+        frequency: Optional[Union[str, Frequency]] = None,
+        include_aliases: bool = True
+    ) -> list[dict]:
+        """
+        Get fields of an instrument that match specific metadata criteria.
+
+        Returns fields where the metadata contains all the specified key-value pairs.
+        The match is exact for each key-value pair in the filter.
+
+        Args:
+            ticker: Ticker of the instrument
+            metadata_filter: Dict of metadata key-value pairs to match.
+                             All pairs must match for a field to be included.
+            frequency: Optional frequency filter
+            include_aliases: Whether to include alias fields
+
+        Returns:
+            List of dicts with field information for matching fields
+
+        Example:
+            # Find all volatility fields with delta=50
+            fields = db.get_fields_by_metadata(
+                "AAPL",
+                {"type": "volatility", "delta": 50}
+            )
+
+            # Find all fields with unit="percent" at daily frequency
+            fields = db.get_fields_by_metadata(
+                "AAPL",
+                {"unit": "percent"},
+                frequency="daily"
+            )
+        """
+        # Get all fields for the instrument
+        fields = self.list_fields(
+            ticker=ticker,
+            frequency=frequency,
+            include_aliases=include_aliases
+        )
+
+        result = []
+        for f in fields:
+            # Check if all metadata filter criteria match
+            matches = True
+            for key, value in metadata_filter.items():
+                if key not in f.metadata or f.metadata[key] != value:
+                    matches = False
+                    break
+
+            if matches:
+                result.append({
+                    "field_name": f.field_name,
+                    "frequency": f.frequency.value,
+                    "description": f.description,
+                    "unit": f.unit,
+                    "metadata": f.metadata,
+                    "is_alias": f.alias_ticker is not None,
+                    "alias_target": f"{f.alias_ticker}.{f.alias_field_name}" if f.alias_ticker else None
+                })
+
+        return result
+
     def get_aliases_for_field(
         self,
         ticker: str,
