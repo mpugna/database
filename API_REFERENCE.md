@@ -295,7 +295,7 @@ if db.is_storable_field("price"):
 
 ### add_instrument
 
-Add a new financial instrument.
+Add a new financial instrument, or overwrite an existing one.
 
 ```python
 def add_instrument(
@@ -307,12 +307,14 @@ def add_instrument(
     currency: str = "USD",
     exchange: str = "",
     metadata: Optional[dict] = None,
-    extra_data: Optional[dict] = None
+    extra_data: Optional[dict] = None,
+    overwrite: bool = False
 ) -> Instrument
 ```
 
 **Example:**
 ```python
+# Add new instrument
 apple = db.add_instrument(
     ticker="AAPL",
     name="Apple Inc.",
@@ -321,6 +323,16 @@ apple = db.add_instrument(
     exchange="NASDAQ",
     metadata={"sector": "Technology"},
     extra_data={"isin": "US0378331005"}
+)
+
+# Update existing instrument using overwrite=True
+apple = db.add_instrument(
+    ticker="AAPL",
+    name="Apple Inc.",
+    instrument_type=InstrumentType.STOCK,
+    metadata={"sector": "Technology", "industry": "Consumer Electronics"},
+    extra_data={"isin": "US0378331005", "pe_ratio": 28.5},
+    overwrite=True
 )
 ```
 
@@ -361,49 +373,6 @@ stocks = db.list_instruments(instrument_type=InstrumentType.STOCK)
 
 # Search by name/ticker
 results = db.list_instruments(search="Apple")
-```
-
-### update_instrument
-
-Update instrument attributes.
-
-```python
-def update_instrument(
-    self,
-    ticker: str,
-    **kwargs
-) -> Optional[Instrument]
-```
-
-**Example:**
-```python
-updated = db.update_instrument(
-    "AAPL",
-    name="Apple Inc. (Updated)",
-    metadata={"sector": "Technology", "industry": "Consumer Electronics"}
-)
-```
-
-### update_instrument_extra_data
-
-Update or merge extra_data for an instrument.
-
-```python
-def update_instrument_extra_data(
-    self,
-    ticker: str,
-    extra_data: dict,
-    merge: bool = True
-) -> Optional[Instrument]
-```
-
-**Example:**
-```python
-# Merge with existing data
-db.update_instrument_extra_data("AAPL", {"pe_ratio": 28.5})
-
-# Replace entirely
-db.update_instrument_extra_data("AAPL", {"new_field": "value"}, merge=False)
 ```
 
 ### get_instrument_extra_data
@@ -456,7 +425,7 @@ impact = db.delete_instrument("AAPL")
 
 ### add_field
 
-Associate a storable field with an instrument at a specific frequency.
+Associate a storable field with an instrument at a specific frequency, or overwrite an existing one.
 
 The field's description and metadata are inherited from the storable field registry.
 Use `add_storable_field()` to define field properties.
@@ -467,7 +436,11 @@ def add_field(
     ticker: str,
     field_name: str,
     frequency: Frequency | str,
-    unit: str = ""
+    unit: str = "",
+    alias_ticker: Optional[str] = None,
+    alias_field_name: Optional[str] = None,
+    alias_frequency: Optional[Frequency | str] = None,
+    overwrite: bool = False
 ) -> InstrumentField
 ```
 
@@ -486,6 +459,15 @@ eps_field = db.add_field(
     ticker="AAPL",
     field_name="eps",
     frequency="quarterly"
+)
+
+# Update existing field using overwrite=True
+price_field = db.add_field(
+    ticker="AAPL",
+    field_name="price",
+    frequency=Frequency.DAILY,
+    unit="GBP",
+    overwrite=True
 )
 
 # For custom metadata, first define the storable field
@@ -674,29 +656,6 @@ resolved = db.resolve_alias("SPX", "total_return", "daily")
 print(f"Points to: {resolved.field_name}")
 ```
 
-### update_field
-
-Update field attributes.
-
-```python
-def update_field(
-    self,
-    ticker: str,
-    field_name: str,
-    frequency: Frequency | str,
-    **kwargs
-) -> Optional[InstrumentField]
-```
-
-**Example:**
-```python
-updated = db.update_field(
-    "AAPL", "price", "daily",
-    description="Adjusted closing price",
-    unit="USD"
-)
-```
-
 ### delete_field
 
 Delete a field and its data.
@@ -727,7 +686,7 @@ impact = db.delete_field("AAPL", "price", "daily")
 
 ### add_provider_config
 
-Add a data provider configuration for a field.
+Add a data provider configuration for a field, or overwrite an existing one.
 
 ```python
 def add_provider_config(
@@ -739,7 +698,8 @@ def add_provider_config(
     config: dict,
     is_active: bool = True,
     priority: int = 0,
-    pct_change: bool = False
+    pct_change: bool = False,
+    overwrite: bool = False
 ) -> ProviderConfig
 ```
 
@@ -764,6 +724,17 @@ yahoo_config = db.add_provider_config(
     config={"symbol": "AAPL"},
     priority=1  # Backup
 )
+
+# Update existing config using overwrite=True
+bb_config = db.add_provider_config(
+    ticker="AAPL",
+    field_name="price",
+    frequency="daily",
+    provider=DataProvider.BLOOMBERG,
+    config={"ticker": "AAPL US Equity", "field": "PX_LAST"},
+    priority=2,  # Demoted
+    overwrite=True
+)
 ```
 
 ### get_provider_configs
@@ -785,31 +756,6 @@ def get_provider_configs(
 configs = db.get_provider_configs("AAPL", "price", "daily")
 for cfg in configs:
     print(f"{cfg.provider.value}: priority {cfg.priority}")
-```
-
-### update_provider_config
-
-Update a provider configuration.
-
-```python
-def update_provider_config(
-    self,
-    ticker: str,
-    field_name: str,
-    frequency: Frequency | str,
-    provider: DataProvider,
-    **kwargs
-) -> Optional[ProviderConfig]
-```
-
-**Example:**
-```python
-updated = db.update_provider_config(
-    "AAPL", "price", "daily",
-    DataProvider.BLOOMBERG,
-    priority=2,
-    is_active=False
-)
 ```
 
 ### delete_provider_config
