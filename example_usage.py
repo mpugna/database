@@ -363,42 +363,49 @@ def main():
         print(f"    - {f.field_name} ({f.frequency.value})")
 
     # =========================================================================
-    # 12. Update Operations
+    # 12. Overwrite Operations (using add methods with overwrite=True)
     # =========================================================================
-    print("\n✏️  Update operations...")
+    print("\n✏️  Overwrite operations...")
 
-    # Update instrument
-    db.update_instrument(
-        "AAPL",
-        metadata={"sector": "Technology", "industry": "Consumer Electronics", "updated": True}
+    # Overwrite instrument with updated metadata
+    db.add_instrument(
+        ticker="AAPL",
+        name="Apple Inc.",
+        instrument_type=InstrumentType.STOCK,
+        description="American multinational technology company",
+        currency="USD",
+        exchange="NASDAQ",
+        metadata={"sector": "Technology", "industry": "Consumer Electronics", "updated": True},
+        extra_data={"isin": "US0378331005", "cusip": "037833100", "sedol": "2046251",
+                   "pe_ratio": 28.5, "dividend_yield": 0.5, "market_cap": 2800000000000,
+                   "beta": 1.25, "analyst_rating": "Buy"},
+        overwrite=True
     )
     updated_apple = db.get_instrument("AAPL")
     print(f"  Updated AAPL metadata: {updated_apple.metadata}")
-
-    # Update extra_data with merge (adds new fields while preserving existing)
-    db.update_instrument_extra_data(
-        "AAPL",
-        {"pe_ratio": 28.5, "dividend_yield": 0.5, "market_cap": 2800000000000}
-    )
-    updated_apple = db.get_instrument("AAPL")
     print(f"  Updated AAPL extra_data: {updated_apple.extra_data}")
-
-    # Add more extra_data (merges with existing)
-    db.update_instrument_extra_data("AAPL", {"beta": 1.25, "analyst_rating": "Buy"})
-    print(f"  Merged AAPL extra_data: {db.get_instrument_extra_data('AAPL')}")
 
     # Get a specific extra_data field
     pe_ratio = db.get_instrument_extra_data("AAPL", "pe_ratio")
     print(f"  AAPL P/E ratio: {pe_ratio}")
 
-    # Update field
-    db.update_field("AAPL", "price", Frequency.DAILY, description="Last traded closing price (updated)")
+    # Overwrite field (description comes from storable field registry)
+    db.add_storable_field("price", "Last traded closing price (updated)", {"unit": "currency"}, overwrite=True)
+    db.add_field("AAPL", "price", Frequency.DAILY, unit="USD", overwrite=True)
     updated_field = db.get_field("AAPL", "price", Frequency.DAILY)
     print(f"  Updated field description: {updated_field.description}")
 
-    # Update provider config
-    db.update_provider_config("AAPL", "price", Frequency.DAILY, DataProvider.BLOOMBERG, priority=2)  # Demote Bloomberg
-    db.update_provider_config("AAPL", "price", Frequency.DAILY, DataProvider.YAHOO_FINANCE, priority=0)  # Promote Yahoo
+    # Overwrite provider configs with new priorities
+    db.add_provider_config(
+        "AAPL", "price", Frequency.DAILY, DataProvider.BLOOMBERG,
+        config={"ticker": "AAPL US Equity", "field": "PX_LAST", "periodicity": "DAILY"},
+        priority=2, overwrite=True  # Demote Bloomberg
+    )
+    db.add_provider_config(
+        "AAPL", "price", Frequency.DAILY, DataProvider.YAHOO_FINANCE,
+        config={"symbol": "AAPL", "data_type": "adj_close"},
+        priority=0, overwrite=True  # Promote Yahoo
+    )
     configs = db.get_provider_configs("AAPL", "price", Frequency.DAILY)
     print(f"  Updated provider priorities:")
     for c in configs:

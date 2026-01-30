@@ -704,7 +704,8 @@ class FinancialTimeSeriesDB:
         currency: str = "USD",
         exchange: str = "",
         metadata: Optional[dict] = None,
-        extra_data: Optional[dict] = None
+        extra_data: Optional[dict] = None,
+        overwrite: bool = False
     ) -> Instrument:
         """
         Add a new instrument to the database.
@@ -718,30 +719,61 @@ class FinancialTimeSeriesDB:
             exchange: Exchange where traded
             metadata: Additional metadata as dictionary
             extra_data: Additional JSON data for flexible storage
+            overwrite: If True, overwrites existing instrument. If False, raises error if exists.
 
         Returns:
             The created Instrument object with its ID
 
         Raises:
-            sqlite3.IntegrityError: If ticker already exists
+            sqlite3.IntegrityError: If ticker already exists and overwrite=False
+
+        Example:
+            # Add new instrument
+            db.add_instrument("AAPL", "Apple Inc.", InstrumentType.STOCK)
+
+            # Update existing instrument
+            db.add_instrument("AAPL", "Apple Inc.", InstrumentType.STOCK,
+                              description="Updated description", overwrite=True)
         """
         metadata = metadata or {}
         extra_data = extra_data or {}
 
-        with self._get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO instruments (ticker, name, instrument_type, description,
-                                         currency, exchange, metadata, extra_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (ticker, name, instrument_type.value, description,
-                 currency, exchange, json.dumps(metadata), json.dumps(extra_data))
+        existing = self.get_instrument(ticker)
+        if existing and not overwrite:
+            raise sqlite3.IntegrityError(
+                f"Instrument with ticker '{ticker}' already exists. "
+                f"Use overwrite=True to update it."
             )
-            conn.commit()
+
+        with self._get_connection() as conn:
+            if existing and overwrite:
+                # Update existing instrument
+                conn.execute(
+                    """
+                    UPDATE instruments SET name = ?, instrument_type = ?, description = ?,
+                                           currency = ?, exchange = ?, metadata = ?, extra_data = ?
+                    WHERE ticker = ?
+                    """,
+                    (name, instrument_type.value, description,
+                     currency, exchange, json.dumps(metadata), json.dumps(extra_data), ticker)
+                )
+                conn.commit()
+                logger.info(f"Updated instrument: {ticker}")
+            else:
+                # Insert new instrument
+                conn.execute(
+                    """
+                    INSERT INTO instruments (ticker, name, instrument_type, description,
+                                             currency, exchange, metadata, extra_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (ticker, name, instrument_type.value, description,
+                     currency, exchange, json.dumps(metadata), json.dumps(extra_data))
+                )
+                conn.commit()
+                logger.info(f"Added instrument: {ticker}")
 
             instrument = self.get_instrument(ticker)
-            logger.info(f"Added instrument: {ticker}")
             return instrument
 
     def get_instrument(self, ticker: str) -> Optional[Instrument]:
@@ -795,86 +827,6 @@ class FinancialTimeSeriesDB:
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_instrument(row) for row in rows]
-
-    def update_instrument(
-        self,
-        ticker: str,
-        **kwargs
-    ) -> Optional[Instrument]:
-        """
-        Update an instrument's attributes.
-
-        Args:
-            ticker: Ticker of the instrument to update
-            **kwargs: Attributes to update (name, instrument_type,
-                      description, currency, exchange, metadata, extra_data)
-
-        Returns:
-            Updated Instrument or None if not found
-        """
-        instrument = self.get_instrument(ticker)
-        if not instrument:
-            return None
-
-        allowed_fields = {'name', 'instrument_type', 'description',
-                          'currency', 'exchange', 'metadata', 'extra_data'}
-
-        updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
-        if not updates:
-            return instrument
-
-        # Handle special conversions
-        if 'instrument_type' in updates and isinstance(updates['instrument_type'], InstrumentType):
-            updates['instrument_type'] = updates['instrument_type'].value
-        if 'metadata' in updates and isinstance(updates['metadata'], dict):
-            updates['metadata'] = json.dumps(updates['metadata'])
-        if 'extra_data' in updates and isinstance(updates['extra_data'], dict):
-            updates['extra_data'] = json.dumps(updates['extra_data'])
-
-        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-        values = list(updates.values()) + [instrument.id]
-
-        with self._get_connection() as conn:
-            conn.execute(
-                f"UPDATE instruments SET {set_clause} WHERE id = ?",
-                values
-            )
-            conn.commit()
-
-        logger.info(f"Updated instrument: {ticker}")
-        return self.get_instrument(ticker)
-
-    def update_instrument_extra_data(
-        self,
-        ticker: str,
-        data: dict,
-        merge: bool = True
-    ) -> Optional[Instrument]:
-        """
-        Update an instrument's extra_data JSON field.
-
-        Args:
-            ticker: Ticker of the instrument to update
-            data: Dictionary of data to add/update
-            merge: If True, merge with existing data (default). If False, replace entirely.
-
-        Returns:
-            Updated Instrument or None if not found
-
-        Example:
-            db.update_instrument_extra_data("AAPL", {"sector": "Technology", "beta": 1.2})
-        """
-        instrument = self.get_instrument(ticker)
-        if not instrument:
-            return None
-
-        if merge:
-            existing = instrument.extra_data or {}
-            new_data = {**existing, **data}
-        else:
-            new_data = data
-
-        return self.update_instrument(ticker, extra_data=new_data)
 
     def get_instrument_extra_data(
         self,
@@ -1062,7 +1014,8 @@ class FinancialTimeSeriesDB:
         unit: str = "",
         alias_ticker: Optional[str] = None,
         alias_field_name: Optional[str] = None,
-        alias_frequency: Optional[Union[str, Frequency]] = None
+        alias_frequency: Optional[Union[str, Frequency]] = None,
+        overwrite: bool = False
     ) -> InstrumentField:
         """
         Associate a storable field with an instrument at a specific frequency.
@@ -1078,18 +1031,35 @@ class FinancialTimeSeriesDB:
             alias_ticker: If this is an alias, the ticker of the target instrument
             alias_field_name: If this is an alias, the target field name
             alias_frequency: If this is an alias, the target frequency (defaults to same)
+            overwrite: If True, overwrites existing field. If False, raises error if exists.
 
         Returns:
             The created InstrumentField object
 
         Raises:
             ValueError: If ticker not found, alias params incomplete, or field_name not allowed
+            sqlite3.IntegrityError: If field already exists and overwrite=False
+
+        Example:
+            # Add new field
+            db.add_field("AAPL", "price", "daily")
+
+            # Update existing field
+            db.add_field("AAPL", "price", "daily", unit="USD", overwrite=True)
         """
         freq = _to_frequency(frequency)
         instrument_id = self._get_instrument_id(ticker)
 
         # Validate field name
         self.validate_field_name(field_name)
+
+        # Check for existing field
+        existing = self.get_field(ticker, field_name, freq)
+        if existing and not overwrite:
+            raise sqlite3.IntegrityError(
+                f"Field '{field_name}' already exists for {ticker} at {freq.value}. "
+                f"Use overwrite=True to update it."
+            )
 
         # Get description and metadata from storable field definition
         storable_field = self.get_storable_field(field_name)
@@ -1114,21 +1084,37 @@ class FinancialTimeSeriesDB:
             alias_field_id = self._get_field_id(alias_ticker, alias_field_name, alias_freq)
 
         with self._get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO instrument_fields
-                (instrument_id, field_name, frequency, description, unit,
-                 alias_instrument_id, alias_field_id, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (instrument_id, field_name, freq.value, description, unit,
-                 alias_instrument_id, alias_field_id, json.dumps(field_metadata))
-            )
-            conn.commit()
+            if existing and overwrite:
+                # Update existing field
+                conn.execute(
+                    """
+                    UPDATE instrument_fields SET description = ?, unit = ?,
+                           alias_instrument_id = ?, alias_field_id = ?, metadata = ?
+                    WHERE id = ?
+                    """,
+                    (description, unit, alias_instrument_id, alias_field_id,
+                     json.dumps(field_metadata), existing.id)
+                )
+                conn.commit()
+                logger.info(f"Updated field: {ticker}.{field_name} ({freq.value})")
+                return self._get_field_by_id(existing.id)
+            else:
+                # Insert new field
+                cursor = conn.execute(
+                    """
+                    INSERT INTO instrument_fields
+                    (instrument_id, field_name, frequency, description, unit,
+                     alias_instrument_id, alias_field_id, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (instrument_id, field_name, freq.value, description, unit,
+                     alias_instrument_id, alias_field_id, json.dumps(field_metadata))
+                )
+                conn.commit()
 
-            field = self._get_field_by_id(cursor.lastrowid)
-            logger.info(f"Added field: {ticker}.{field_name} ({freq.value})")
-            return field
+                field = self._get_field_by_id(cursor.lastrowid)
+                logger.info(f"Added field: {ticker}.{field_name} ({freq.value})")
+                return field
 
     def add_alias_field(
         self,
@@ -1418,49 +1404,6 @@ class FinancialTimeSeriesDB:
             current_field_name = field.alias_field_name
             current_frequency = Frequency(field.alias_frequency)
 
-    def update_field(
-        self,
-        ticker: str,
-        field_name: str,
-        frequency: Union[str, Frequency],
-        **kwargs
-    ) -> Optional[InstrumentField]:
-        """
-        Update a field's attributes.
-
-        Args:
-            ticker: Ticker of the instrument
-            field_name: Name of the field
-            frequency: Data frequency
-            **kwargs: Attributes to update (description, unit, metadata)
-
-        Returns:
-            Updated field or None if not found
-        """
-        field_id = self._get_field_id(ticker, field_name, frequency)
-
-        allowed_fields = {'description', 'unit', 'metadata'}
-        updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
-
-        if not updates:
-            return self._get_field_by_id(field_id)
-
-        if 'metadata' in updates and isinstance(updates['metadata'], dict):
-            updates['metadata'] = json.dumps(updates['metadata'])
-
-        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-        values = list(updates.values()) + [field_id]
-
-        with self._get_connection() as conn:
-            conn.execute(
-                f"UPDATE instrument_fields SET {set_clause} WHERE id = ?",
-                values
-            )
-            conn.commit()
-
-        logger.info(f"Updated field: {ticker}.{field_name}")
-        return self._get_field_by_id(field_id)
-
     def delete_field(
         self,
         ticker: str,
@@ -1597,7 +1540,8 @@ class FinancialTimeSeriesDB:
         config: dict,
         is_active: bool = True,
         priority: int = 0,
-        pct_change: bool = False
+        pct_change: bool = False,
+        overwrite: bool = False
     ) -> ProviderConfig:
         """
         Add a data provider configuration for a field.
@@ -1612,32 +1556,77 @@ class FinancialTimeSeriesDB:
             priority: Priority for fetching (lower = higher priority)
             pct_change: If True, apply percent change transformation before storing.
                        Downloaded values will be converted to percentage changes.
+            overwrite: If True, overwrites existing config. If False, raises error if exists.
 
         Returns:
             The created ProviderConfig
+
+        Raises:
+            sqlite3.IntegrityError: If config already exists and overwrite=False
+
+        Example:
+            # Add new config
+            db.add_provider_config("AAPL", "price", "daily", DataProvider.BLOOMBERG,
+                                   {"ticker": "AAPL US Equity"})
+
+            # Update existing config
+            db.add_provider_config("AAPL", "price", "daily", DataProvider.BLOOMBERG,
+                                   {"ticker": "AAPL US Equity"}, priority=2, overwrite=True)
         """
         field_id = self._get_field_id(ticker, field_name, frequency)
+
+        # Check for existing config
+        with self._get_connection() as conn:
+            existing_row = conn.execute(
+                "SELECT id FROM provider_configs WHERE field_id = ? AND provider = ?",
+                (field_id, provider.value)
+            ).fetchone()
+
+        if existing_row and not overwrite:
+            raise sqlite3.IntegrityError(
+                f"Provider config for {provider.value} already exists for "
+                f"{ticker}.{field_name} ({frequency if isinstance(frequency, str) else frequency.value}). "
+                f"Use overwrite=True to update it."
+            )
 
         # Merge pct_change into config
         full_config = {**config, "pct_change": pct_change}
 
         with self._get_connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO provider_configs (field_id, provider, config, is_active, priority)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (field_id, provider.value, json.dumps(full_config), int(is_active), priority)
-            )
-            conn.commit()
+            if existing_row and overwrite:
+                # Update existing config
+                conn.execute(
+                    """
+                    UPDATE provider_configs SET config = ?, is_active = ?, priority = ?
+                    WHERE id = ?
+                    """,
+                    (json.dumps(full_config), int(is_active), priority, existing_row['id'])
+                )
+                conn.commit()
+                logger.info(
+                    f"Updated provider config: {provider.value} for {ticker}.{field_name} "
+                    f"({frequency if isinstance(frequency, str) else frequency.value}), "
+                    f"priority={priority}, active={is_active}"
+                )
+                return self._get_provider_config_by_id(existing_row['id'])
+            else:
+                # Insert new config
+                cursor = conn.execute(
+                    """
+                    INSERT INTO provider_configs (field_id, provider, config, is_active, priority)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (field_id, provider.value, json.dumps(full_config), int(is_active), priority)
+                )
+                conn.commit()
 
-            provider_config = self._get_provider_config_by_id(cursor.lastrowid)
-            logger.info(
-                f"Added provider config: {provider.value} for {ticker}.{field_name} "
-                f"({frequency if isinstance(frequency, str) else frequency.value}), "
-                f"priority={priority}, active={is_active}"
-            )
-            return provider_config
+                provider_config = self._get_provider_config_by_id(cursor.lastrowid)
+                logger.info(
+                    f"Added provider config: {provider.value} for {ticker}.{field_name} "
+                    f"({frequency if isinstance(frequency, str) else frequency.value}), "
+                    f"priority={priority}, active={is_active}"
+                )
+                return provider_config
 
     def _get_provider_config_by_id(self, config_id: int) -> Optional[ProviderConfig]:
         """Get a provider config by its internal ID."""
@@ -1672,83 +1661,6 @@ class FinancialTimeSeriesDB:
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
             return [self._row_to_provider_config(row) for row in rows]
-
-    def update_provider_config(
-        self,
-        ticker: str,
-        field_name: str,
-        frequency: Union[str, Frequency],
-        provider: DataProvider,
-        pct_change: Optional[bool] = None,
-        **kwargs
-    ) -> Optional[ProviderConfig]:
-        """
-        Update a provider config.
-
-        Args:
-            ticker: Ticker of the instrument
-            field_name: Name of the field
-            frequency: Data frequency
-            provider: Data provider type
-            pct_change: If provided, update the percent change transformation setting
-            **kwargs: Other fields to update (config, is_active, priority)
-
-        Returns:
-            Updated ProviderConfig or None if not found
-        """
-        field_id = self._get_field_id(ticker, field_name, frequency)
-
-        with self._get_connection() as conn:
-            row = conn.execute(
-                "SELECT id, config FROM provider_configs WHERE field_id = ? AND provider = ?",
-                (field_id, provider.value)
-            ).fetchone()
-
-            if not row:
-                return None
-
-            config_id = row['id']
-            existing_config = json.loads(row['config']) if row['config'] else {}
-
-        allowed_fields = {'config', 'is_active', 'priority'}
-        updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
-
-        # Handle pct_change - merge into config
-        if pct_change is not None:
-            if 'config' in updates and isinstance(updates['config'], dict):
-                updates['config']['pct_change'] = pct_change
-            else:
-                # Merge with existing config
-                existing_config['pct_change'] = pct_change
-                updates['config'] = existing_config
-
-        if not updates:
-            return self._get_provider_config_by_id(config_id)
-
-        if 'config' in updates and isinstance(updates['config'], dict):
-            updates['config'] = json.dumps(updates['config'])
-        if 'is_active' in updates:
-            updates['is_active'] = int(updates['is_active'])
-
-        set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
-        values = list(updates.values()) + [config_id]
-
-        with self._get_connection() as conn:
-            conn.execute(
-                f"UPDATE provider_configs SET {set_clause} WHERE id = ?",
-                values
-            )
-            conn.commit()
-
-        updated_fields = list(kwargs.keys())
-        if pct_change is not None:
-            updated_fields.append('pct_change')
-        logger.info(
-            f"Updated provider config: {provider.value} for {ticker}.{field_name} "
-            f"({frequency if isinstance(frequency, str) else frequency.value}), "
-            f"updated fields: {updated_fields}"
-        )
-        return self._get_provider_config_by_id(config_id)
 
     def delete_provider_config(
         self,
