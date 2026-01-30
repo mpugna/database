@@ -19,6 +19,8 @@ from .financial_ts_db import (
     FinancialTimeSeriesDB,
     DataProvider,
     ProviderConfig,
+    InstrumentField,
+    Frequency,
 )
 
 logger = logging.getLogger(__name__)
@@ -658,3 +660,261 @@ def create_provider_config(
         "pct_change": pct_change,
         **kwargs
     }
+
+
+# =============================================================================
+# Bloomberg-Specific Helper Functions
+# =============================================================================
+
+# Bloomberg security type suffixes (for formatting tickers)
+BLOOMBERG_SECURITY_TYPE_SUFFIXES = {
+    "stock": "Equity",
+    "index": "Index",
+    "etf": "Equity",
+    "bond": "Corp",
+    "commodity": "Comdty",
+    "currency": "Curncy",
+    "mutual_fund": "Equity",
+    "crypto": "Curncy",
+}
+
+
+def format_bloomberg_ticker(
+    ticker: str,
+    security_type: str = "stock",
+    exchange: str = "US"
+) -> str:
+    """
+    Format a ticker into Bloomberg format.
+
+    Args:
+        ticker: Base ticker symbol (e.g., "AAPL")
+        security_type: Type of security (stock, index, bond, etc.)
+        exchange: Exchange code (e.g., "US", "LN", "JP")
+
+    Returns:
+        Bloomberg-formatted ticker (e.g., "AAPL US Equity")
+
+    Example:
+        format_bloomberg_ticker("AAPL")  # Returns "AAPL US Equity"
+        format_bloomberg_ticker("SPX", "index")  # Returns "SPX Index"
+        format_bloomberg_ticker("VOD", "stock", "LN")  # Returns "VOD LN Equity"
+    """
+    suffix = BLOOMBERG_SECURITY_TYPE_SUFFIXES.get(security_type.lower(), "Equity")
+
+    if security_type.lower() == "index":
+        return f"{ticker} {suffix}"
+
+    return f"{ticker} {exchange} {suffix}"
+
+
+def create_bloomberg_config(
+    bloomberg_ticker: str,
+    bloomberg_field: str,
+    overrides: Optional[dict] = None,
+    pct_change: bool = False,
+) -> dict:
+    """
+    Create a Bloomberg provider config dictionary.
+
+    Args:
+        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity")
+        bloomberg_field: Bloomberg field name (e.g., "PX_LAST")
+        overrides: Optional Bloomberg field overrides
+        pct_change: If True, apply percent change transformation before storing
+
+    Returns:
+        Config dict ready for use with add_provider_config()
+
+    Example:
+        config = create_bloomberg_config("AAPL US Equity", "PX_LAST")
+        db.add_provider_config("AAPL", "price", "daily",
+                               DataProvider.BLOOMBERG, config)
+    """
+    return {
+        "ticker": bloomberg_ticker,
+        "field": bloomberg_field,
+        "overrides": overrides or {},
+        "pct_change": pct_change,
+    }
+
+
+def setup_bloomberg_field(
+    db: FinancialTimeSeriesDB,
+    ticker: str,
+    field_name: str,
+    frequency: str,
+    bloomberg_ticker: str,
+    bloomberg_field: str,
+    overrides: Optional[dict] = None,
+    pct_change: bool = False,
+    priority: int = 0
+) -> tuple[InstrumentField, ProviderConfig]:
+    """
+    Add a field with Bloomberg provider config in one call.
+
+    This is a convenience function that creates both an instrument field
+    and its Bloomberg provider configuration in a single operation.
+
+    Args:
+        db: FinancialTimeSeriesDB instance
+        ticker: Instrument ticker in database (e.g., "AAPL")
+        field_name: Internal field name (must be in storable fields registry)
+        frequency: Data frequency (e.g., "daily", "weekly")
+        bloomberg_ticker: Full Bloomberg ticker (e.g., "AAPL US Equity")
+        bloomberg_field: Bloomberg field name (e.g., "PX_LAST")
+        overrides: Optional Bloomberg field overrides
+        pct_change: If True, apply percent change transformation
+        priority: Provider priority (lower = higher priority)
+
+    Returns:
+        Tuple of (InstrumentField, ProviderConfig)
+
+    Example:
+        field, config = setup_bloomberg_field(
+            db=db,
+            ticker="AAPL",
+            field_name="price",
+            frequency="daily",
+            bloomberg_ticker="AAPL US Equity",
+            bloomberg_field="PX_LAST"
+        )
+    """
+    freq_enum = Frequency(frequency.lower())
+
+    field = db.add_field(
+        ticker=ticker,
+        field_name=field_name,
+        frequency=freq_enum
+    )
+
+    config_dict = create_bloomberg_config(
+        bloomberg_ticker=bloomberg_ticker,
+        bloomberg_field=bloomberg_field,
+        overrides=overrides,
+        pct_change=pct_change,
+    )
+
+    provider_config = db.add_provider_config(
+        ticker=ticker,
+        field_name=field_name,
+        frequency=frequency,
+        provider=DataProvider.BLOOMBERG,
+        config=config_dict,
+        priority=priority
+    )
+
+    return field, provider_config
+
+
+def get_or_setup_bloomberg_field(
+    db: FinancialTimeSeriesDB,
+    ticker: str,
+    field_name: str,
+    frequency: str = "daily",
+    bloomberg_ticker: Optional[str] = None,
+    bloomberg_field: Optional[str] = None,
+    overrides: Optional[dict] = None,
+    pct_change: bool = False,
+    priority: int = 0
+) -> tuple[InstrumentField, ProviderConfig, bool]:
+    """
+    Get an existing Bloomberg field or create it if it doesn't exist.
+
+    This function first checks if the field exists. If it does, it returns
+    the existing field and its Bloomberg config. If not, it creates both.
+
+    Args:
+        db: FinancialTimeSeriesDB instance
+        ticker: Instrument ticker in database
+        field_name: Internal field name
+        frequency: Data frequency (default: "daily")
+        bloomberg_ticker: Full Bloomberg ticker (required if creating new)
+        bloomberg_field: Bloomberg field name (required if creating new)
+        overrides: Optional Bloomberg field overrides
+        pct_change: If True, apply percent change transformation
+        priority: Provider priority (lower = higher priority)
+
+    Returns:
+        Tuple of (InstrumentField, ProviderConfig, was_created)
+        was_created is True if a new field was created, False if existing
+
+    Raises:
+        ValueError: If instrument not found, or field doesn't exist and
+                   bloomberg_ticker/bloomberg_field not provided
+
+    Example:
+        # Get existing or create new
+        field, config, created = get_or_setup_bloomberg_field(
+            db=db,
+            ticker="AAPL",
+            field_name="price",
+            frequency="daily",
+            bloomberg_ticker="AAPL US Equity",
+            bloomberg_field="PX_LAST"
+        )
+        if created:
+            print("Created new field")
+        else:
+            print("Using existing field")
+    """
+    freq_enum = Frequency(frequency.lower())
+
+    instrument = db.get_instrument(ticker)
+    if not instrument:
+        raise ValueError(f"Instrument not found with ticker: {ticker}")
+
+    existing_field = db.get_field(ticker, field_name, freq_enum)
+
+    if existing_field:
+        # Field exists, check for Bloomberg config
+        configs = db.get_provider_configs(ticker, field_name, frequency, active_only=True)
+        bloomberg_config = None
+        for config in configs:
+            if config.provider == DataProvider.BLOOMBERG:
+                bloomberg_config = config
+                break
+
+        if not bloomberg_config:
+            # Field exists but no Bloomberg config
+            if not bloomberg_ticker or not bloomberg_field:
+                raise ValueError(
+                    f"Field exists but has no Bloomberg config. "
+                    f"You must provide bloomberg_ticker and bloomberg_field to add one."
+                )
+            config_dict = create_bloomberg_config(
+                bloomberg_ticker=bloomberg_ticker,
+                bloomberg_field=bloomberg_field,
+                overrides=overrides,
+                pct_change=pct_change,
+            )
+            bloomberg_config = db.add_provider_config(
+                ticker=ticker,
+                field_name=field_name,
+                frequency=frequency,
+                provider=DataProvider.BLOOMBERG,
+                config=config_dict,
+                priority=priority
+            )
+
+        return existing_field, bloomberg_config, False
+
+    # Field doesn't exist, create it
+    if not bloomberg_ticker or not bloomberg_field:
+        raise ValueError(
+            f"Field does not exist. "
+            f"You must provide bloomberg_ticker and bloomberg_field to create it."
+        )
+
+    field, config = setup_bloomberg_field(
+        db=db,
+        ticker=ticker,
+        field_name=field_name,
+        frequency=frequency,
+        bloomberg_ticker=bloomberg_ticker,
+        bloomberg_field=bloomberg_field,
+        overrides=overrides,
+        pct_change=pct_change,
+        priority=priority
+    )
+    return field, config, True
