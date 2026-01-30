@@ -117,7 +117,6 @@ class Instrument:
     name: str = ""
     instrument_type: InstrumentType = InstrumentType.OTHER
     description: str = ""
-    currency: str = "USD"
     exchange: str = ""
     metadata: dict = field(default_factory=dict)
     extra_data: dict = field(default_factory=dict)
@@ -192,7 +191,6 @@ CREATE TABLE IF NOT EXISTS instruments (
     name TEXT NOT NULL,
     instrument_type TEXT NOT NULL,
     description TEXT DEFAULT '',
-    currency TEXT DEFAULT 'USD',
     exchange TEXT DEFAULT '',
     metadata TEXT DEFAULT '{}',
     extra_data TEXT DEFAULT '{}',
@@ -701,7 +699,6 @@ class FinancialTimeSeriesDB:
         name: str,
         instrument_type: InstrumentType,
         description: str = "",
-        currency: str = "USD",
         exchange: str = "",
         metadata: Optional[dict] = None,
         extra_data: Optional[dict] = None,
@@ -715,7 +712,6 @@ class FinancialTimeSeriesDB:
             name: Full name of the instrument
             instrument_type: Type of instrument (stock, index, etc.)
             description: Optional description
-            currency: Currency code (default: USD)
             exchange: Exchange where traded
             metadata: Additional metadata as dictionary
             extra_data: Additional JSON data for flexible storage
@@ -751,11 +747,11 @@ class FinancialTimeSeriesDB:
                 conn.execute(
                     """
                     UPDATE instruments SET name = ?, instrument_type = ?, description = ?,
-                                           currency = ?, exchange = ?, metadata = ?, extra_data = ?
+                                           exchange = ?, metadata = ?, extra_data = ?
                     WHERE ticker = ?
                     """,
                     (name, instrument_type.value, description,
-                     currency, exchange, json.dumps(metadata), json.dumps(extra_data), ticker)
+                     exchange, json.dumps(metadata), json.dumps(extra_data), ticker)
                 )
                 conn.commit()
                 logger.info(f"Updated instrument: {ticker}")
@@ -764,11 +760,11 @@ class FinancialTimeSeriesDB:
                 conn.execute(
                     """
                     INSERT INTO instruments (ticker, name, instrument_type, description,
-                                             currency, exchange, metadata, extra_data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                             exchange, metadata, extra_data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (ticker, name, instrument_type.value, description,
-                     currency, exchange, json.dumps(metadata), json.dumps(extra_data))
+                     exchange, json.dumps(metadata), json.dumps(extra_data))
                 )
                 conn.commit()
                 logger.info(f"Added instrument: {ticker}")
@@ -2104,7 +2100,6 @@ class FinancialTimeSeriesDB:
             name=row['name'],
             instrument_type=InstrumentType(row['instrument_type']),
             description=row['description'],
-            currency=row['currency'],
             exchange=row['exchange'],
             metadata=json.loads(row['metadata']) if row['metadata'] else {},
             extra_data=json.loads(row['extra_data']) if row['extra_data'] else {},
