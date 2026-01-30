@@ -581,7 +581,7 @@ class DataFetcher:
 
         for dp in data_points:
             if prev_value is not None and prev_value != 0:
-                pct_change_value = ((dp.value - prev_value) / prev_value) * 100
+                pct_change_value = ((dp.value - prev_value) / prev_value)
                 transformed.append(DataPoint(
                     date=dp.date,
                     value=pct_change_value,
