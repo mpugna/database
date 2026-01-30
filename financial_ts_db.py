@@ -1806,7 +1806,7 @@ class FinancialTimeSeriesDB:
         # Normalize field_name to a list
         field_names = [field_name] if isinstance(field_name, str) else field_name
 
-        # Convert dates once (outside any loop)
+        # Convert dates once
         sd = None
         if start_date:
             sd = start_date
@@ -1819,24 +1819,19 @@ class FinancialTimeSeriesDB:
             if isinstance(ed, date) and not isinstance(ed, datetime):
                 ed = datetime.combine(ed, datetime.max.time())
 
-        # Pre-resolve all field IDs upfront (maps field_id -> field_name)
-        field_id_to_name: dict[int, str] = {}
-        for fname in field_names:
-            field_id = self._get_field_id(ticker, fname, freq)
-            actual_field_id = field_id
-            if resolve_alias:
-                resolved_field = self.resolve_alias(ticker, fname, freq)
-                actual_field_id = resolved_field.id
-            field_id_to_name[actual_field_id] = fname
+        # Batch resolve all field IDs in a single query
+        field_id_to_name = self._batch_resolve_field_ids(
+            ticker, field_names, freq, resolve_alias
+        )
 
         if not field_id_to_name:
             return pd.DataFrame()
 
-        # Build single query for all fields using IN clause
+        # Build query for all fields
         field_ids = list(field_id_to_name.keys())
         placeholders = ",".join("?" * len(field_ids))
         query = f"SELECT field_id, timestamp, value FROM time_series_data WHERE field_id IN ({placeholders})"
-        params: list[Any] = field_ids
+        params: list[Any] = list(field_ids)
 
         if sd:
             query += " AND timestamp >= ?"
@@ -1848,26 +1843,119 @@ class FinancialTimeSeriesDB:
 
         query += " ORDER BY timestamp"
 
-        # Execute single query and pivot results
+        # Use pandas read_sql for optimized data loading
         with self._get_connection() as conn:
-            rows = conn.execute(query, params).fetchall()
+            df = pd.read_sql_query(query, conn, params=params)
 
-        # Group data by field_name
-        data_by_field: dict[str, tuple[list, list]] = {fname: ([], []) for fname in field_names}
-        for row in rows:
-            fname = field_id_to_name[row['field_id']]
-            data_by_field[fname][0].append(row['timestamp'])
-            data_by_field[fname][1].append(row['value'])
+        if df.empty:
+            # Return empty DataFrame with correct columns
+            result = pd.DataFrame(columns=field_names)
+            result.index.name = 'timestamp'
+            return result
 
-        # Build series dict
-        series_dict = {}
-        for fname, (timestamps, values) in data_by_field.items():
-            series_dict[fname] = pd.Series(values, index=pd.DatetimeIndex(timestamps))
+        # Map field_id to field_name
+        df['field_name'] = df['field_id'].map(field_id_to_name)
 
-        # Combine all series into a DataFrame
-        df = pd.DataFrame(series_dict)
-        df.index.name = 'timestamp'
-        return df
+        # Pivot to wide format: timestamp as index, field_names as columns
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        result = df.pivot(index='timestamp', columns='field_name', values='value')
+
+        # Ensure column order matches input and include missing columns
+        result = result.reindex(columns=field_names)
+        result.index.name = 'timestamp'
+        result.columns.name = None
+
+        return result
+
+    def _batch_resolve_field_ids(
+        self,
+        ticker: str,
+        field_names: list[str],
+        frequency: Frequency,
+        resolve_alias: bool
+    ) -> dict[int, str]:
+        """
+        Resolve multiple field names to their field IDs in a single query.
+
+        Returns:
+            Dict mapping field_id to field_name
+        """
+        if not field_names:
+            return {}
+
+        # Get instrument ID first
+        with self._get_connection() as conn:
+            inst_row = conn.execute(
+                "SELECT id FROM instruments WHERE ticker = ?",
+                (ticker,)
+            ).fetchone()
+            if not inst_row:
+                raise ValueError(f"Instrument not found with ticker: {ticker}")
+            instrument_id = inst_row['id']
+
+            # Batch query for all fields at once
+            placeholders = ",".join("?" * len(field_names))
+            rows = conn.execute(
+                f"""
+                SELECT id, field_name, alias_field_id
+                FROM instrument_fields
+                WHERE instrument_id = ? AND frequency = ? AND field_name IN ({placeholders})
+                """,
+                [instrument_id, frequency.value] + list(field_names)
+            ).fetchall()
+
+            if len(rows) != len(field_names):
+                found = {r['field_name'] for r in rows}
+                missing = set(field_names) - found
+                raise ValueError(f"Fields not found: {missing}")
+
+            field_id_to_name: dict[int, str] = {}
+
+            if not resolve_alias:
+                # Simple case: just map field IDs directly
+                for row in rows:
+                    field_id_to_name[row['id']] = row['field_name']
+            else:
+                # Need to resolve aliases
+                # Collect alias IDs that need resolution
+                alias_ids_to_resolve = []
+                direct_fields = []
+
+                for row in rows:
+                    if row['alias_field_id'] is not None:
+                        alias_ids_to_resolve.append((row['alias_field_id'], row['field_name']))
+                    else:
+                        direct_fields.append((row['id'], row['field_name']))
+                        field_id_to_name[row['id']] = row['field_name']
+
+                # Resolve aliases (may chain, so we need a loop)
+                while alias_ids_to_resolve:
+                    alias_ids = [aid for aid, _ in alias_ids_to_resolve]
+                    placeholders = ",".join("?" * len(alias_ids))
+                    alias_rows = conn.execute(
+                        f"""
+                        SELECT id, alias_field_id
+                        FROM instrument_fields
+                        WHERE id IN ({placeholders})
+                        """,
+                        alias_ids
+                    ).fetchall()
+
+                    alias_map = {r['id']: r['alias_field_id'] for r in alias_rows}
+                    next_to_resolve = []
+
+                    for alias_id, field_name in alias_ids_to_resolve:
+                        target_alias = alias_map.get(alias_id)
+                        if target_alias is None:
+                            # This alias points to a real field
+                            field_id_to_name[alias_id] = field_name
+                        else:
+                            # Chain continues
+                            next_to_resolve.append((target_alias, field_name))
+
+                    alias_ids_to_resolve = next_to_resolve
+
+        return field_id_to_name
 
     def get_all_time_series(
         self,
