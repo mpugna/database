@@ -138,7 +138,6 @@ Represents a financial instrument.
 | `name` | `str` | Full name |
 | `instrument_type` | `InstrumentType` | Type of instrument |
 | `description` | `str` | Description |
-| `currency` | `str` | Currency (default: "USD") |
 | `exchange` | `str` | Exchange |
 | `metadata` | `dict` | Additional metadata |
 | `extra_data` | `dict` | Custom extra data |
@@ -304,7 +303,6 @@ def add_instrument(
     name: str,
     instrument_type: InstrumentType,
     description: str = "",
-    currency: str = "USD",
     exchange: str = "",
     metadata: Optional[dict] = None,
     extra_data: Optional[dict] = None,
@@ -319,7 +317,6 @@ apple = db.add_instrument(
     ticker="AAPL",
     name="Apple Inc.",
     instrument_type=InstrumentType.STOCK,
-    currency="USD",
     exchange="NASDAQ",
     metadata={"sector": "Technology"},
     extra_data={"isin": "US0378331005"}
@@ -1067,8 +1064,8 @@ db.add_storable_field("high", "High price")
 db.add_storable_field("low", "Low price")
 
 # Add instruments
-db.add_instrument("AAPL", "Apple Inc.", InstrumentType.STOCK, currency="USD")
-db.add_instrument("GOOGL", "Alphabet Inc.", InstrumentType.STOCK, currency="USD")
+db.add_instrument("AAPL", "Apple Inc.", InstrumentType.STOCK)
+db.add_instrument("GOOGL", "Alphabet Inc.", InstrumentType.STOCK)
 
 # Add fields
 for ticker in ["AAPL", "GOOGL"]:

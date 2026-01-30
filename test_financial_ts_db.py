@@ -43,7 +43,6 @@ class TestInstrumentOperations(unittest.TestCase):
             ticker="AAPL",
             name="Apple Inc.",
             instrument_type=InstrumentType.STOCK,
-            currency="USD",
             exchange="NASDAQ"
         )
 

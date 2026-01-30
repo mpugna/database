@@ -59,7 +59,6 @@ def main():
         name="Apple Inc.",
         instrument_type=InstrumentType.STOCK,
         description="American multinational technology company",
-        currency="USD",
         exchange="NASDAQ",
         metadata={"sector": "Technology", "industry": "Consumer Electronics"},
         extra_data={"isin": "US0378331005", "cusip": "037833100", "sedol": "2046251"}
@@ -73,7 +72,6 @@ def main():
         name="S&P 500 Index",
         instrument_type=InstrumentType.INDEX,
         description="Market-cap weighted index of 500 leading US companies",
-        currency="USD",
         exchange="INDEX"
     )
     print(f"  Added: {spx.ticker} - {spx.name} (ID: {spx.id})")
@@ -83,8 +81,7 @@ def main():
         ticker="SPXTR",
         name="S&P 500 Total Return Index",
         instrument_type=InstrumentType.INDEX,
-        description="S&P 500 with dividends reinvested",
-        currency="USD"
+        description="S&P 500 with dividends reinvested"
     )
     print(f"  Added: {spxtr.ticker} - {spxtr.name} (ID: {spxtr.id})")
 
@@ -94,7 +91,6 @@ def main():
         name="US Unemployment Rate",
         instrument_type=InstrumentType.ECONOMIC_INDICATOR,
         description="Civilian unemployment rate, seasonally adjusted",
-        currency="USD",
         metadata={"source": "Bureau of Labor Statistics"}
     )
     print(f"  Added: {unrate.ticker} - {unrate.name} (ID: {unrate.id})")
@@ -373,7 +369,6 @@ def main():
         name="Apple Inc.",
         instrument_type=InstrumentType.STOCK,
         description="American multinational technology company",
-        currency="USD",
         exchange="NASDAQ",
         metadata={"sector": "Technology", "industry": "Consumer Electronics", "updated": True},
         extra_data={"isin": "US0378331005", "cusip": "037833100", "sedol": "2046251",
@@ -510,7 +505,6 @@ def bloomberg_example():
         ticker="AAPL",
         name="Apple Inc.",
         instrument_type=InstrumentType.STOCK,
-        currency="USD",
         exchange="NASDAQ"
     )
     print(f"  Added: {apple.ticker} (ID: {apple.id})")
@@ -534,7 +528,6 @@ def bloomberg_example():
         ticker="MSFT",
         name="Microsoft Corporation",
         instrument_type=InstrumentType.STOCK,
-        currency="USD",
         exchange="NASDAQ"
     )
 
