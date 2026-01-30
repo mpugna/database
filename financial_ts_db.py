@@ -1585,8 +1585,11 @@ class FinancialTimeSeriesDB:
                 f"Use overwrite=True to update it."
             )
 
-        # Merge pct_change into config
-        full_config = {**config, "pct_change": pct_change}
+        # Merge pct_change into config (preserve value from config dict if present)
+        if "pct_change" not in config:
+            full_config = {**config, "pct_change": pct_change}
+        else:
+            full_config = config
 
         with self._get_connection() as conn:
             if existing_row and overwrite:
